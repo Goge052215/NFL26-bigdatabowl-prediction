@@ -1,0 +1,609 @@
+5.8s	1	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+5.8s	2	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+5.8s	3	0.00s - to python to disable frozen modules.
+5.8s	4	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+6.5s	5	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+6.5s	6	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+6.5s	7	0.00s - to python to disable frozen modules.
+6.5s	8	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+16.5s	9	Loading training data...
+26.4s	10	Train input:  (4880579, 23)
+26.4s	11	Train output: (562936, 6)
+26.4s	12	
+26.4s	13	Engineering features on train…
+163.4s	14	Computing neighbor embeddings (train)…
+182.9s	15	Train rows (pre-merge GNN): (562936, 128)
+184.5s	16	Physics baseline RMSE: 4.23701
+184.5s	17	Using 128 features (incl. GNN-lite).
+188.8s	18	
+188.8s	19	Training residual ensemble...
+188.8s	20	
+188.8s	21	=== Training Residual Learning Ensemble ===
+188.8s	22	Training primary CatBoost model...
+188.8s	23	Using GroupKFold by (game_id,play_id,nfl_id).
+189.5s	24	
+189.5s	25	Fold 1/5 — train 450,339 | val 112,583
+191.7s	26	0:	learn: 4.3679366	test: 4.3814093	best: 4.3814093 (0)	total: 270ms	remaining: 1h 30m 6s
+223.7s	27	200:	learn: 0.6124474	test: 0.7507114	best: 0.7507114 (200)	total: 32.3s	remaining: 53m
+256.1s	28	400:	learn: 0.4910201	test: 0.7175916	best: 0.7175093 (398)	total: 1m 4s	remaining: 52m 37s
+288.6s	29	600:	learn: 0.4225261	test: 0.7055042	best: 0.7054607 (599)	total: 1m 37s	remaining: 52m 14s
+321.4s	30	800:	learn: 0.3751802	test: 0.6988724	best: 0.6988596 (797)	total: 2m 9s	remaining: 51m 51s
+354.6s	31	1000:	learn: 0.3403696	test: 0.6946387	best: 0.6946286 (999)	total: 2m 42s	remaining: 51m 33s
+387.6s	32	1200:	learn: 0.3127297	test: 0.6899174	best: 0.6899174 (1200)	total: 3m 15s	remaining: 51m 7s
+420.8s	33	1400:	learn: 0.2906568	test: 0.6875835	best: 0.6875835 (1400)	total: 3m 49s	remaining: 50m 42s
+454.6s	34	1600:	learn: 0.2717015	test: 0.6857117	best: 0.6856276 (1596)	total: 4m 22s	remaining: 50m 21s
+487.3s	35	1800:	learn: 0.2563332	test: 0.6842126	best: 0.6841385 (1798)	total: 4m 55s	remaining: 49m 46s
+521.4s	36	2000:	learn: 0.2421194	test: 0.6829688	best: 0.6829449 (1997)	total: 5m 29s	remaining: 49m 25s
+555.0s	37	2200:	learn: 0.2299452	test: 0.6820369	best: 0.6819922 (2197)	total: 6m 3s	remaining: 48m 57s
+588.1s	38	2400:	learn: 0.2192974	test: 0.6813184	best: 0.6813184 (2400)	total: 6m 36s	remaining: 48m 25s
+621.6s	39	2600:	learn: 0.2098837	test: 0.6800363	best: 0.6800363 (2600)	total: 7m 9s	remaining: 47m 54s
+654.8s	40	2800:	learn: 0.2013861	test: 0.6792499	best: 0.6792499 (2800)	total: 7m 42s	remaining: 47m 22s
+688.0s	41	3000:	learn: 0.1938218	test: 0.6786720	best: 0.6786316 (2954)	total: 8m 16s	remaining: 46m 50s
+721.2s	42	3200:	learn: 0.1867474	test: 0.6779106	best: 0.6779106 (3200)	total: 8m 49s	remaining: 46m 17s
+754.4s	43	3400:	learn: 0.1803091	test: 0.6775197	best: 0.6775167 (3392)	total: 9m 22s	remaining: 45m 45s
+787.8s	44	3600:	learn: 0.1743911	test: 0.6769458	best: 0.6769130 (3594)	total: 9m 55s	remaining: 45m 13s
+820.7s	45	3800:	learn: 0.1690697	test: 0.6764093	best: 0.6763700 (3789)	total: 10m 28s	remaining: 44m 39s
+854.4s	46	4000:	learn: 0.1638826	test: 0.6760408	best: 0.6760290 (3994)	total: 11m 2s	remaining: 44m 8s
+887.6s	47	4200:	learn: 0.1590609	test: 0.6757418	best: 0.6757418 (4200)	total: 11m 35s	remaining: 43m 35s
+920.9s	48	4400:	learn: 0.1546539	test: 0.6754273	best: 0.6754273 (4400)	total: 12m 8s	remaining: 43m 3s
+954.1s	49	4600:	learn: 0.1505315	test: 0.6750461	best: 0.6750425 (4595)	total: 12m 41s	remaining: 42m 30s
+987.9s	50	4800:	learn: 0.1465240	test: 0.6746113	best: 0.6745993 (4797)	total: 13m 15s	remaining: 41m 59s
+1021.2s	51	5000:	learn: 0.1429402	test: 0.6743537	best: 0.6743522 (4993)	total: 13m 48s	remaining: 41m 26s
+1054.8s	52	5200:	learn: 0.1394628	test: 0.6739128	best: 0.6739128 (5200)	total: 14m 22s	remaining: 40m 54s
+1087.8s	53	5400:	learn: 0.1362625	test: 0.6738305	best: 0.6738222 (5399)	total: 14m 55s	remaining: 40m 20s
+1121.1s	54	5600:	learn: 0.1332126	test: 0.6737381	best: 0.6736457 (5564)	total: 15m 28s	remaining: 39m 47s
+1154.1s	55	5800:	learn: 0.1303349	test: 0.6735191	best: 0.6734768 (5778)	total: 16m 1s	remaining: 39m 13s
+1187.3s	56	6000:	learn: 0.1274712	test: 0.6735033	best: 0.6734768 (5778)	total: 16m 34s	remaining: 38m 41s
+1220.7s	57	6200:	learn: 0.1247699	test: 0.6732732	best: 0.6732644 (6197)	total: 17m 8s	remaining: 38m 8s
+1254.4s	58	6400:	learn: 0.1221907	test: 0.6731035	best: 0.6730861 (6388)	total: 17m 41s	remaining: 37m 36s
+1287.3s	59	6600:	learn: 0.1197382	test: 0.6730093	best: 0.6729981 (6507)	total: 18m 14s	remaining: 37m 2s
+1320.0s	60	6800:	learn: 0.1175056	test: 0.6728561	best: 0.6728364 (6777)	total: 18m 47s	remaining: 36m 28s
+1353.3s	61	7000:	learn: 0.1152353	test: 0.6727171	best: 0.6727149 (6960)	total: 19m 20s	remaining: 35m 55s
+1386.8s	62	7200:	learn: 0.1131148	test: 0.6726380	best: 0.6725961 (7155)	total: 19m 54s	remaining: 35m 22s
+1419.3s	63	7400:	learn: 0.1111723	test: 0.6724745	best: 0.6724726 (7399)	total: 20m 26s	remaining: 34m 48s
+1452.1s	64	7600:	learn: 0.1092573	test: 0.6723669	best: 0.6723599 (7599)	total: 20m 59s	remaining: 34m 14s
+1485.2s	65	7800:	learn: 0.1074482	test: 0.6722552	best: 0.6722552 (7800)	total: 21m 32s	remaining: 33m 41s
+1517.6s	66	8000:	learn: 0.1056745	test: 0.6720756	best: 0.6720683 (7983)	total: 22m 4s	remaining: 33m 7s
+1550.7s	67	8200:	learn: 0.1039237	test: 0.6719383	best: 0.6719212 (8184)	total: 22m 37s	remaining: 32m 33s
+1583.4s	68	8400:	learn: 0.1022600	test: 0.6719054	best: 0.6718930 (8315)	total: 23m 10s	remaining: 32m
+1616.7s	69	8600:	learn: 0.1005756	test: 0.6718560	best: 0.6718516 (8596)	total: 23m 43s	remaining: 31m 27s
+1649.8s	70	8800:	learn: 0.0990127	test: 0.6717498	best: 0.6717385 (8738)	total: 24m 16s	remaining: 30m 53s
+1682.2s	71	9000:	learn: 0.0975748	test: 0.6716771	best: 0.6716706 (8998)	total: 24m 49s	remaining: 30m 19s
+1715.5s	72	9200:	learn: 0.0961252	test: 0.6716010	best: 0.6715657 (9130)	total: 25m 22s	remaining: 29m 47s
+1749.1s	73	9400:	learn: 0.0947500	test: 0.6715855	best: 0.6715392 (9342)	total: 25m 56s	remaining: 29m 14s
+1782.4s	74	9600:	learn: 0.0933570	test: 0.6715611	best: 0.6715379 (9442)	total: 26m 29s	remaining: 28m 41s
+1815.1s	75	9800:	learn: 0.0920634	test: 0.6714908	best: 0.6714827 (9698)	total: 27m 2s	remaining: 28m 8s
+1847.8s	76	10000:	learn: 0.0908009	test: 0.6714116	best: 0.6714087 (9989)	total: 27m 34s	remaining: 27m 34s
+1880.4s	77	10200:	learn: 0.0896018	test: 0.6713498	best: 0.6713450 (10172)	total: 28m 7s	remaining: 27m
+1913.4s	78	10400:	learn: 0.0884602	test: 0.6713432	best: 0.6713288 (10393)	total: 28m 40s	remaining: 26m 27s
+1946.1s	79	10600:	learn: 0.0872724	test: 0.6713259	best: 0.6712704 (10463)	total: 29m 12s	remaining: 25m 54s
+1978.6s	80	10800:	learn: 0.0861659	test: 0.6714028	best: 0.6712704 (10463)	total: 29m 45s	remaining: 25m 20s
+2005.4s	81	Stopped by overfitting detector  (500 iterations wait)
+2005.4s	82	
+2005.4s	83	bestTest = 0.6712704438
+2005.4s	84	bestIteration = 10463
+2005.4s	85	
+2005.4s	86	Shrink model to first 10464 iterations.
+2007.3s	87	0:	learn: 3.4626973	test: 3.5020359	best: 3.5020359 (0)	total: 238ms	remaining: 1h 19m 14s
+2040.4s	88	200:	learn: 0.5641993	test: 0.6995152	best: 0.6995152 (200)	total: 33.3s	remaining: 54m 44s
+2072.8s	89	400:	learn: 0.4565052	test: 0.6700469	best: 0.6700469 (400)	total: 1m 5s	remaining: 53m 31s
+2105.0s	90	600:	learn: 0.3941040	test: 0.6609193	best: 0.6606400 (597)	total: 1m 37s	remaining: 52m 37s
+2137.7s	91	800:	learn: 0.3510478	test: 0.6547192	best: 0.6545893 (798)	total: 2m 10s	remaining: 52m 7s
+2170.5s	92	1000:	learn: 0.3189906	test: 0.6511600	best: 0.6511156 (998)	total: 2m 43s	remaining: 51m 39s
+2203.6s	93	1200:	learn: 0.2939447	test: 0.6496911	best: 0.6493824 (1163)	total: 3m 16s	remaining: 51m 13s
+2236.6s	94	1400:	learn: 0.2728492	test: 0.6473040	best: 0.6472374 (1396)	total: 3m 49s	remaining: 50m 44s
+2269.6s	95	1600:	learn: 0.2552878	test: 0.6460067	best: 0.6459103 (1596)	total: 4m 22s	remaining: 50m 14s
+2303.0s	96	1800:	learn: 0.2407452	test: 0.6447731	best: 0.6444477 (1771)	total: 4m 55s	remaining: 49m 47s
+2336.5s	97	2000:	learn: 0.2274950	test: 0.6439862	best: 0.6439558 (1994)	total: 5m 29s	remaining: 49m 19s
+2369.9s	98	2200:	learn: 0.2163979	test: 0.6434265	best: 0.6433985 (2194)	total: 6m 2s	remaining: 48m 50s
+2403.4s	99	2400:	learn: 0.2065716	test: 0.6427158	best: 0.6427073 (2399)	total: 6m 35s	remaining: 48m 21s
+2436.8s	100	2600:	learn: 0.1976097	test: 0.6424825	best: 0.6424173 (2527)	total: 7m 9s	remaining: 47m 51s
+2470.3s	101	2800:	learn: 0.1893868	test: 0.6422501	best: 0.6421930 (2750)	total: 7m 42s	remaining: 47m 21s
+2503.6s	102	3000:	learn: 0.1819720	test: 0.6423840	best: 0.6421930 (2750)	total: 8m 16s	remaining: 46m 49s
+2536.5s	103	3200:	learn: 0.1752000	test: 0.6422764	best: 0.6421930 (2750)	total: 8m 48s	remaining: 46m 15s
+2570.2s	104	3400:	learn: 0.1690660	test: 0.6419558	best: 0.6418548 (3384)	total: 9m 22s	remaining: 45m 45s
+2604.1s	105	3600:	learn: 0.1633060	test: 0.6418991	best: 0.6417963 (3449)	total: 9m 56s	remaining: 45m 16s
+2637.4s	106	3800:	learn: 0.1580156	test: 0.6414564	best: 0.6414479 (3796)	total: 10m 29s	remaining: 44m 43s
+2670.4s	107	4000:	learn: 0.1531627	test: 0.6415271	best: 0.6413716 (3854)	total: 11m 2s	remaining: 44m 9s
+2704.5s	108	4200:	learn: 0.1487256	test: 0.6414412	best: 0.6413716 (3854)	total: 11m 36s	remaining: 43m 40s
+2738.0s	109	4400:	learn: 0.1444273	test: 0.6411135	best: 0.6411065 (4399)	total: 12m 10s	remaining: 43m 8s
+2771.0s	110	4600:	learn: 0.1406766	test: 0.6408903	best: 0.6408733 (4589)	total: 12m 43s	remaining: 42m 34s
+2804.2s	111	4800:	learn: 0.1370274	test: 0.6408639	best: 0.6408192 (4770)	total: 13m 16s	remaining: 42m 1s
+2837.0s	112	5000:	learn: 0.1336481	test: 0.6407866	best: 0.6407412 (4982)	total: 13m 49s	remaining: 41m 26s
+2870.4s	113	5200:	learn: 0.1303829	test: 0.6408854	best: 0.6407293 (5053)	total: 14m 22s	remaining: 40m 54s
+2903.0s	114	5400:	learn: 0.1273659	test: 0.6408445	best: 0.6407293 (5053)	total: 14m 54s	remaining: 40m 19s
+2928.2s	115	Stopped by overfitting detector  (500 iterations wait)
+2928.2s	116	
+2928.2s	117	bestTest = 0.6407292802
+2928.2s	118	bestIteration = 5053
+2928.2s	119	
+2928.2s	120	Shrink model to first 5054 iterations.
+2930.1s	121	Fold 1 RMSE: 0.65578
+2930.1s	122	
+2930.1s	123	Fold 2/5 — train 450,339 | val 112,583
+2932.2s	124	0:	learn: 4.3514747	test: 4.4447067	best: 4.4447067 (0)	total: 215ms	remaining: 1h 11m 42s
+2964.1s	125	200:	learn: 0.6115761	test: 0.8006755	best: 0.8006755 (200)	total: 32.1s	remaining: 52m 41s
+2997.0s	126	400:	learn: 0.4906329	test: 0.7719352	best: 0.7719352 (400)	total: 1m 4s	remaining: 52m 50s
+3030.1s	127	600:	learn: 0.4221065	test: 0.7618206	best: 0.7608378 (579)	total: 1m 37s	remaining: 52m 42s
+3063.2s	128	800:	learn: 0.3748696	test: 0.7542819	best: 0.7542437 (798)	total: 2m 11s	remaining: 52m 20s
+3096.9s	129	1000:	learn: 0.3392059	test: 0.7466952	best: 0.7465481 (980)	total: 2m 44s	remaining: 52m 6s
+3130.4s	130	1200:	learn: 0.3115516	test: 0.7438053	best: 0.7434432 (1141)	total: 3m 18s	remaining: 51m 42s
+3163.3s	131	1400:	learn: 0.2901162	test: 0.7420460	best: 0.7419467 (1391)	total: 3m 51s	remaining: 51m 7s
+3197.7s	132	1600:	learn: 0.2713719	test: 0.7379582	best: 0.7379582 (1600)	total: 4m 25s	remaining: 50m 49s
+3231.5s	133	1800:	learn: 0.2555930	test: 0.7372845	best: 0.7372845 (1800)	total: 4m 59s	remaining: 50m 23s
+3265.6s	134	2000:	learn: 0.2416183	test: 0.7359594	best: 0.7359594 (2000)	total: 5m 33s	remaining: 49m 57s
+3298.9s	135	2200:	learn: 0.2293910	test: 0.7350219	best: 0.7348197 (2154)	total: 6m 6s	remaining: 49m 23s
+3332.6s	136	2400:	learn: 0.2189906	test: 0.7349796	best: 0.7346721 (2348)	total: 6m 40s	remaining: 48m 53s
+3366.7s	137	2600:	learn: 0.2093487	test: 0.7341747	best: 0.7340857 (2562)	total: 7m 14s	remaining: 48m 24s
+3400.3s	138	2800:	learn: 0.2012705	test: 0.7337081	best: 0.7336968 (2799)	total: 7m 47s	remaining: 47m 52s
+3434.1s	139	3000:	learn: 0.1934155	test: 0.7329966	best: 0.7329966 (3000)	total: 8m 21s	remaining: 47m 20s
+3467.2s	140	3200:	learn: 0.1866142	test: 0.7313442	best: 0.7313442 (3200)	total: 8m 54s	remaining: 46m 45s
+3501.4s	141	3400:	learn: 0.1800379	test: 0.7309325	best: 0.7308882 (3397)	total: 9m 28s	remaining: 46m 16s
+3534.9s	142	3600:	learn: 0.1742661	test: 0.7302769	best: 0.7302291 (3596)	total: 10m 2s	remaining: 45m 42s
+3568.2s	143	3800:	learn: 0.1689968	test: 0.7299239	best: 0.7299036 (3779)	total: 10m 35s	remaining: 45m 8s
+3601.5s	144	4000:	learn: 0.1639282	test: 0.7291506	best: 0.7291506 (4000)	total: 11m 8s	remaining: 44m 34s
+3634.7s	145	4200:	learn: 0.1593288	test: 0.7291762	best: 0.7288723 (4089)	total: 11m 41s	remaining: 43m 59s
+3668.1s	146	4400:	learn: 0.1550074	test: 0.7292673	best: 0.7288723 (4089)	total: 12m 15s	remaining: 43m 26s
+3700.9s	147	4600:	learn: 0.1509886	test: 0.7286664	best: 0.7285385 (4562)	total: 12m 48s	remaining: 42m 50s
+3734.6s	148	4800:	learn: 0.1471077	test: 0.7278503	best: 0.7277993 (4790)	total: 13m 21s	remaining: 42m 18s
+3767.4s	149	5000:	learn: 0.1435807	test: 0.7269697	best: 0.7269697 (5000)	total: 13m 54s	remaining: 41m 42s
+3800.6s	150	5200:	learn: 0.1401119	test: 0.7261358	best: 0.7260440 (5183)	total: 14m 27s	remaining: 41m 8s
+3833.6s	151	5400:	learn: 0.1368236	test: 0.7257246	best: 0.7256879 (5396)	total: 15m	remaining: 40m 34s
+3866.9s	152	5600:	learn: 0.1336654	test: 0.7255992	best: 0.7254503 (5578)	total: 15m 33s	remaining: 40m
+3899.8s	153	5800:	learn: 0.1307781	test: 0.7253684	best: 0.7253073 (5718)	total: 16m 6s	remaining: 39m 26s
+3933.0s	154	6000:	learn: 0.1280583	test: 0.7255933	best: 0.7253073 (5718)	total: 16m 39s	remaining: 38m 52s
+3966.1s	155	6200:	learn: 0.1254471	test: 0.7255253	best: 0.7253073 (5718)	total: 17m 12s	remaining: 38m 18s
+3968.9s	156	Stopped by overfitting detector  (500 iterations wait)
+3968.9s	157	
+3968.9s	158	bestTest = 0.7253073091
+3968.9s	159	bestIteration = 5718
+3968.9s	160	
+3968.9s	161	Shrink model to first 5719 iterations.
+3970.6s	162	0:	learn: 3.4725456	test: 3.4608272	best: 3.4608272 (0)	total: 245ms	remaining: 1h 21m 46s
+4003.8s	163	200:	learn: 0.5619396	test: 0.7207424	best: 0.7207424 (200)	total: 33.4s	remaining: 54m 47s
+4036.3s	164	400:	learn: 0.4508995	test: 0.6915930	best: 0.6912405 (396)	total: 1m 5s	remaining: 53m 39s
+4068.9s	165	600:	learn: 0.3915523	test: 0.6824668	best: 0.6823833 (598)	total: 1m 38s	remaining: 52m 54s
+4101.5s	166	800:	learn: 0.3498368	test: 0.6768495	best: 0.6768187 (798)	total: 2m 11s	remaining: 52m 20s
+4134.3s	167	1000:	learn: 0.3178394	test: 0.6719659	best: 0.6713957 (984)	total: 2m 43s	remaining: 51m 48s
+4167.4s	168	1200:	learn: 0.2928980	test: 0.6700176	best: 0.6699383 (1188)	total: 3m 16s	remaining: 51m 19s
+4200.0s	169	1400:	learn: 0.2727767	test: 0.6688393	best: 0.6687647 (1390)	total: 3m 49s	remaining: 50m 44s
+4233.5s	170	1600:	learn: 0.2552402	test: 0.6672769	best: 0.6671956 (1597)	total: 4m 22s	remaining: 50m 20s
+4266.8s	171	1800:	learn: 0.2403046	test: 0.6646996	best: 0.6646832 (1799)	total: 4m 56s	remaining: 49m 52s
+4300.2s	172	2000:	learn: 0.2276094	test: 0.6633367	best: 0.6633322 (1993)	total: 5m 29s	remaining: 49m 23s
+4333.4s	173	2200:	learn: 0.2164053	test: 0.6625694	best: 0.6624104 (2153)	total: 6m 2s	remaining: 48m 52s
+4366.4s	174	2400:	learn: 0.2065320	test: 0.6612376	best: 0.6612376 (2400)	total: 6m 35s	remaining: 48m 19s
+4399.5s	175	2600:	learn: 0.1976929	test: 0.6609493	best: 0.6608584 (2507)	total: 7m 8s	remaining: 47m 47s
+4432.3s	176	2800:	learn: 0.1898930	test: 0.6611879	best: 0.6607789 (2656)	total: 7m 41s	remaining: 47m 13s
+4465.2s	177	3000:	learn: 0.1826161	test: 0.6600766	best: 0.6600744 (2999)	total: 8m 14s	remaining: 46m 39s
+4498.8s	178	3200:	learn: 0.1759495	test: 0.6596047	best: 0.6593826 (3149)	total: 8m 47s	remaining: 46m 10s
+4532.1s	179	3400:	learn: 0.1698080	test: 0.6590181	best: 0.6587275 (3388)	total: 9m 21s	remaining: 45m 38s
+4565.4s	180	3600:	learn: 0.1640558	test: 0.6593499	best: 0.6587275 (3388)	total: 9m 54s	remaining: 45m 6s
+4598.3s	181	3800:	learn: 0.1590746	test: 0.6595376	best: 0.6587275 (3388)	total: 10m 27s	remaining: 44m 33s
+4612.9s	182	Stopped by overfitting detector  (500 iterations wait)
+4612.9s	183	
+4612.9s	184	bestTest = 0.6587275224
+4612.9s	185	bestIteration = 3388
+4612.9s	186	
+4612.9s	187	Shrink model to first 3389 iterations.
+4614.2s	188	Fold 2 RMSE: 0.68340
+4614.2s	189	
+4614.2s	190	Fold 3/5 — train 450,335 | val 112,587
+4616.3s	191	0:	learn: 4.3764478	test: 4.3437265	best: 4.3437265 (0)	total: 222ms	remaining: 1h 13m 58s
+4648.5s	192	200:	learn: 0.6047695	test: 0.9398311	best: 0.9398311 (200)	total: 32.3s	remaining: 53m
+4680.6s	193	400:	learn: 0.4886179	test: 0.9181853	best: 0.9181853 (400)	total: 1m 4s	remaining: 52m 25s
+4713.9s	194	600:	learn: 0.4199097	test: 0.9042107	best: 0.9039696 (597)	total: 1m 37s	remaining: 52m 33s
+4747.1s	195	800:	learn: 0.3735661	test: 0.9015735	best: 0.9012243 (796)	total: 2m 10s	remaining: 52m 16s
+4780.1s	196	1000:	learn: 0.3390475	test: 0.8979932	best: 0.8978374 (996)	total: 2m 43s	remaining: 51m 47s
+4813.4s	197	1200:	learn: 0.3119756	test: 0.8968824	best: 0.8965351 (1139)	total: 3m 17s	remaining: 51m 24s
+4846.8s	198	1400:	learn: 0.2894177	test: 0.8947366	best: 0.8946706 (1390)	total: 3m 50s	remaining: 50m 59s
+4880.2s	199	1600:	learn: 0.2703286	test: 0.8933258	best: 0.8933226 (1591)	total: 4m 23s	remaining: 50m 31s
+4913.9s	200	1800:	learn: 0.2545189	test: 0.8919738	best: 0.8916836 (1734)	total: 4m 57s	remaining: 50m 6s
+4947.5s	201	2000:	learn: 0.2410009	test: 0.8914713	best: 0.8911018 (1927)	total: 5m 30s	remaining: 49m 37s
+4980.9s	202	2200:	learn: 0.2292229	test: 0.8905886	best: 0.8905147 (2177)	total: 6m 4s	remaining: 49m 6s
+5014.4s	203	2400:	learn: 0.2187447	test: 0.8884768	best: 0.8884393 (2386)	total: 6m 37s	remaining: 48m 36s
+5048.2s	204	2600:	learn: 0.2093932	test: 0.8874604	best: 0.8874604 (2600)	total: 7m 11s	remaining: 48m 7s
+5081.9s	205	2800:	learn: 0.2008460	test: 0.8856147	best: 0.8855772 (2792)	total: 7m 45s	remaining: 47m 37s
+5115.8s	206	3000:	learn: 0.1932009	test: 0.8860110	best: 0.8854667 (2818)	total: 8m 19s	remaining: 47m 7s
+5149.7s	207	3200:	learn: 0.1862071	test: 0.8850330	best: 0.8847022 (3171)	total: 8m 53s	remaining: 46m 37s
+5183.5s	208	3400:	learn: 0.1795780	test: 0.8841335	best: 0.8840552 (3398)	total: 9m 26s	remaining: 46m 6s
+5216.9s	209	3600:	learn: 0.1736622	test: 0.8848404	best: 0.8837693 (3440)	total: 10m	remaining: 45m 33s
+5251.0s	210	3800:	learn: 0.1681084	test: 0.8852764	best: 0.8837693 (3440)	total: 10m 34s	remaining: 45m 2s
+5274.5s	211	Stopped by overfitting detector  (500 iterations wait)
+5274.5s	212	
+5274.5s	213	bestTest = 0.8837693078
+5274.5s	214	bestIteration = 3440
+5274.5s	215	
+5274.5s	216	Shrink model to first 3441 iterations.
+5276.0s	217	0:	learn: 3.4705891	test: 3.4656412	best: 3.4656412 (0)	total: 243ms	remaining: 1h 21m
+5308.9s	218	200:	learn: 0.5650641	test: 0.7609648	best: 0.7609648 (200)	total: 33.1s	remaining: 54m 18s
+5341.3s	219	400:	learn: 0.4541471	test: 0.7378461	best: 0.7378461 (400)	total: 1m 5s	remaining: 53m 19s
+5374.1s	220	600:	learn: 0.3915168	test: 0.7252913	best: 0.7252913 (600)	total: 1m 38s	remaining: 52m 49s
+5406.7s	221	800:	learn: 0.3490491	test: 0.7196411	best: 0.7196411 (800)	total: 2m 10s	remaining: 52m 12s
+5439.7s	222	1000:	learn: 0.3172715	test: 0.7138844	best: 0.7136428 (990)	total: 2m 43s	remaining: 51m 46s
+5472.4s	223	1200:	learn: 0.2918299	test: 0.7089211	best: 0.7088774 (1197)	total: 3m 16s	remaining: 51m 13s
+5505.7s	224	1400:	learn: 0.2717520	test: 0.7069880	best: 0.7069880 (1400)	total: 3m 49s	remaining: 50m 49s
+5539.2s	225	1600:	learn: 0.2544884	test: 0.7045545	best: 0.7045301 (1598)	total: 4m 23s	remaining: 50m 23s
+5572.5s	226	1800:	learn: 0.2393173	test: 0.7019793	best: 0.7019626 (1798)	total: 4m 56s	remaining: 49m 54s
+5605.4s	227	2000:	learn: 0.2266885	test: 0.7011999	best: 0.7011109 (1974)	total: 5m 29s	remaining: 49m 21s
+5638.6s	228	2200:	learn: 0.2157742	test: 0.6992692	best: 0.6992041 (2195)	total: 6m 2s	remaining: 48m 51s
+5672.4s	229	2400:	learn: 0.2058206	test: 0.6980179	best: 0.6978917 (2360)	total: 6m 36s	remaining: 48m 23s
+5705.7s	230	2600:	learn: 0.1971905	test: 0.6966363	best: 0.6966235 (2585)	total: 7m 9s	remaining: 47m 53s
+5739.5s	231	2800:	learn: 0.1890523	test: 0.6963568	best: 0.6960129 (2715)	total: 7m 43s	remaining: 47m 24s
+5773.1s	232	3000:	learn: 0.1818726	test: 0.6957600	best: 0.6957526 (2996)	total: 8m 16s	remaining: 46m 54s
+5806.9s	233	3200:	learn: 0.1751589	test: 0.6953310	best: 0.6951343 (3171)	total: 8m 50s	remaining: 46m 24s
+5840.9s	234	3400:	learn: 0.1690470	test: 0.6947583	best: 0.6947583 (3400)	total: 9m 24s	remaining: 45m 54s
+5874.8s	235	3600:	learn: 0.1632985	test: 0.6943119	best: 0.6942717 (3587)	total: 9m 58s	remaining: 45m 24s
+5908.4s	236	3800:	learn: 0.1580639	test: 0.6947563	best: 0.6942107 (3620)	total: 10m 31s	remaining: 44m 53s
+5942.3s	237	4000:	learn: 0.1532243	test: 0.6945192	best: 0.6942107 (3620)	total: 11m 5s	remaining: 44m 22s
+5962.5s	238	Stopped by overfitting detector  (500 iterations wait)
+5962.5s	239	
+5962.5s	240	bestTest = 0.6942106526
+5962.5s	241	bestIteration = 3620
+5962.5s	242	
+5962.5s	243	Shrink model to first 3621 iterations.
+5963.5s	244	Fold 3 RMSE: 0.76508
+5963.5s	245	
+5963.5s	246	Fold 4/5 — train 450,335 | val 112,587
+5965.9s	247	0:	learn: 4.3888025	test: 4.2882155	best: 4.2882155 (0)	total: 226ms	remaining: 1h 15m 27s
+5998.3s	248	200:	learn: 0.6060451	test: 0.7653832	best: 0.7653832 (200)	total: 32.6s	remaining: 53m 35s
+6031.6s	249	400:	learn: 0.4850857	test: 0.7357895	best: 0.7357895 (400)	total: 1m 5s	remaining: 53m 40s
+6064.7s	250	600:	learn: 0.4172206	test: 0.7262683	best: 0.7262062 (595)	total: 1m 38s	remaining: 53m 14s
+6098.6s	251	800:	learn: 0.3700436	test: 0.7214712	best: 0.7214057 (799)	total: 2m 12s	remaining: 53m 2s
+6132.4s	252	1000:	learn: 0.3358240	test: 0.7198112	best: 0.7197325 (997)	total: 2m 46s	remaining: 52m 42s
+6166.1s	253	1200:	learn: 0.3087442	test: 0.7184333	best: 0.7183302 (1190)	total: 3m 20s	remaining: 52m 14s
+6200.4s	254	1400:	learn: 0.2865694	test: 0.7168079	best: 0.7167467 (1368)	total: 3m 54s	remaining: 51m 52s
+6233.9s	255	1600:	learn: 0.2684628	test: 0.7162317	best: 0.7161926 (1597)	total: 4m 27s	remaining: 51m 19s
+6267.7s	256	1800:	learn: 0.2526282	test: 0.7149355	best: 0.7149355 (1800)	total: 5m 1s	remaining: 50m 49s
+6301.6s	257	2000:	learn: 0.2393017	test: 0.7140685	best: 0.7140593 (1999)	total: 5m 35s	remaining: 50m 19s
+6335.7s	258	2200:	learn: 0.2275339	test: 0.7138949	best: 0.7138442 (2195)	total: 6m 9s	remaining: 49m 48s
+6369.0s	259	2400:	learn: 0.2175209	test: 0.7134954	best: 0.7133558 (2378)	total: 6m 42s	remaining: 49m 13s
+6403.0s	260	2600:	learn: 0.2083222	test: 0.7126659	best: 0.7126659 (2600)	total: 7m 16s	remaining: 48m 42s
+6437.7s	261	2800:	learn: 0.2000067	test: 0.7123058	best: 0.7122965 (2799)	total: 7m 51s	remaining: 48m 15s
+6471.7s	262	3000:	learn: 0.1923733	test: 0.7118471	best: 0.7118208 (2950)	total: 8m 25s	remaining: 47m 43s
+6505.7s	263	3200:	learn: 0.1854556	test: 0.7115350	best: 0.7115350 (3200)	total: 8m 59s	remaining: 47m 11s
+6539.1s	264	3400:	learn: 0.1793384	test: 0.7110858	best: 0.7110730 (3391)	total: 9m 32s	remaining: 46m 35s
+6573.0s	265	3600:	learn: 0.1734226	test: 0.7105966	best: 0.7105949 (3599)	total: 10m 6s	remaining: 46m 3s
+6607.8s	266	3800:	learn: 0.1677816	test: 0.7102590	best: 0.7102590 (3800)	total: 10m 41s	remaining: 45m 33s
+6641.4s	267	4000:	learn: 0.1627542	test: 0.7098918	best: 0.7098517 (3960)	total: 11m 15s	remaining: 44m 59s
+6675.4s	268	4200:	learn: 0.1579963	test: 0.7095279	best: 0.7095209 (4196)	total: 11m 48s	remaining: 44m 26s
+6709.1s	269	4400:	learn: 0.1536989	test: 0.7092342	best: 0.7092342 (4400)	total: 12m 22s	remaining: 43m 52s
+6743.0s	270	4600:	learn: 0.1495742	test: 0.7089693	best: 0.7089249 (4585)	total: 12m 56s	remaining: 43m 18s
+6776.4s	271	4800:	learn: 0.1457835	test: 0.7087797	best: 0.7087797 (4800)	total: 13m 29s	remaining: 42m 43s
+6810.2s	272	5000:	learn: 0.1420195	test: 0.7084811	best: 0.7084480 (4994)	total: 14m 3s	remaining: 42m 10s
+6843.8s	273	5200:	learn: 0.1386930	test: 0.7083972	best: 0.7083363 (5090)	total: 14m 37s	remaining: 41m 36s
+6877.6s	274	5400:	learn: 0.1353169	test: 0.7080046	best: 0.7079513 (5390)	total: 15m 11s	remaining: 41m 2s
+6911.0s	275	5600:	learn: 0.1322862	test: 0.7078607	best: 0.7078586 (5599)	total: 15m 44s	remaining: 40m 27s
+6944.2s	276	5800:	learn: 0.1294208	test: 0.7078421	best: 0.7077870 (5662)	total: 16m 17s	remaining: 39m 52s
+6977.9s	277	6000:	learn: 0.1266825	test: 0.7077418	best: 0.7077052 (5927)	total: 16m 51s	remaining: 39m 18s
+7011.9s	278	6200:	learn: 0.1240691	test: 0.7077245	best: 0.7077052 (5927)	total: 17m 25s	remaining: 38m 45s
+7045.0s	279	6400:	learn: 0.1215873	test: 0.7076217	best: 0.7076042 (6384)	total: 17m 58s	remaining: 38m 10s
+7078.3s	280	6600:	learn: 0.1192589	test: 0.7075996	best: 0.7075727 (6457)	total: 18m 31s	remaining: 37m 36s
+7111.4s	281	6800:	learn: 0.1170279	test: 0.7076375	best: 0.7075328 (6732)	total: 19m 4s	remaining: 37m 1s
+7144.5s	282	7000:	learn: 0.1148812	test: 0.7076903	best: 0.7075328 (6732)	total: 19m 37s	remaining: 36m 26s
+7177.6s	283	7200:	learn: 0.1127870	test: 0.7076957	best: 0.7075328 (6732)	total: 20m 10s	remaining: 35m 51s
+7182.9s	284	Stopped by overfitting detector  (500 iterations wait)
+7182.9s	285	
+7182.9s	286	bestTest = 0.7075327641
+7182.9s	287	bestIteration = 6732
+7182.9s	288	
+7182.9s	289	Shrink model to first 6733 iterations.
+7184.6s	290	0:	learn: 3.4754711	test: 3.4536474	best: 3.4536474 (0)	total: 252ms	remaining: 1h 23m 58s
+7217.7s	291	200:	learn: 0.5626062	test: 0.6761117	best: 0.6761117 (200)	total: 33.3s	remaining: 54m 38s
+7250.4s	292	400:	learn: 0.4532078	test: 0.6472895	best: 0.6472895 (400)	total: 1m 5s	remaining: 53m 42s
+7282.9s	293	600:	learn: 0.3912242	test: 0.6381391	best: 0.6381391 (600)	total: 1m 38s	remaining: 52m 54s
+7316.1s	294	800:	learn: 0.3486251	test: 0.6314626	best: 0.6310177 (784)	total: 2m 11s	remaining: 52m 33s
+7349.2s	295	1000:	learn: 0.3170328	test: 0.6272163	best: 0.6271154 (967)	total: 2m 44s	remaining: 52m 4s
+7382.4s	296	1200:	learn: 0.2920273	test: 0.6246899	best: 0.6246899 (1200)	total: 3m 17s	remaining: 51m 36s
+7415.1s	297	1400:	learn: 0.2722488	test: 0.6226974	best: 0.6226854 (1398)	total: 3m 50s	remaining: 50m 59s
+7448.6s	298	1600:	learn: 0.2548656	test: 0.6209563	best: 0.6209363 (1599)	total: 4m 23s	remaining: 50m 32s
+7481.6s	299	1800:	learn: 0.2402924	test: 0.6202128	best: 0.6202128 (1800)	total: 4m 56s	remaining: 50m
+7514.7s	300	2000:	learn: 0.2279094	test: 0.6195365	best: 0.6194704 (1993)	total: 5m 29s	remaining: 49m 27s
+7547.9s	301	2200:	learn: 0.2167636	test: 0.6187144	best: 0.6186821 (2179)	total: 6m 3s	remaining: 48m 56s
+7581.3s	302	2400:	learn: 0.2066681	test: 0.6180307	best: 0.6179783 (2389)	total: 6m 36s	remaining: 48m 26s
+7614.4s	303	2600:	learn: 0.1978674	test: 0.6170348	best: 0.6170150 (2597)	total: 7m 9s	remaining: 47m 53s
+7647.6s	304	2800:	learn: 0.1900380	test: 0.6164569	best: 0.6164058 (2787)	total: 7m 42s	remaining: 47m 20s
+7680.4s	305	3000:	learn: 0.1828896	test: 0.6161005	best: 0.6160867 (2980)	total: 8m 15s	remaining: 46m 46s
+7713.9s	306	3200:	learn: 0.1761467	test: 0.6154846	best: 0.6154588 (3177)	total: 8m 48s	remaining: 46m 15s
+7747.5s	307	3400:	learn: 0.1702001	test: 0.6151639	best: 0.6151493 (3370)	total: 9m 22s	remaining: 45m 45s
+7780.9s	308	3600:	learn: 0.1647480	test: 0.6148588	best: 0.6148390 (3588)	total: 9m 55s	remaining: 45m 13s
+7814.0s	309	3800:	learn: 0.1595359	test: 0.6148651	best: 0.6148390 (3588)	total: 10m 28s	remaining: 44m 40s
+7847.1s	310	4000:	learn: 0.1547580	test: 0.6149381	best: 0.6148390 (3588)	total: 11m 2s	remaining: 44m 7s
+7880.7s	311	4200:	learn: 0.1503122	test: 0.6147111	best: 0.6146701 (4182)	total: 11m 35s	remaining: 43m 35s
+7914.3s	312	4400:	learn: 0.1458975	test: 0.6144298	best: 0.6144298 (4400)	total: 12m 9s	remaining: 43m 4s
+7947.4s	313	4600:	learn: 0.1418703	test: 0.6141219	best: 0.6141219 (4600)	total: 12m 42s	remaining: 42m 30s
+7980.9s	314	4800:	learn: 0.1380735	test: 0.6139401	best: 0.6139225 (4777)	total: 13m 15s	remaining: 41m 59s
+8014.4s	315	5000:	learn: 0.1346343	test: 0.6138043	best: 0.6137652 (4993)	total: 13m 49s	remaining: 41m 26s
+8047.7s	316	5200:	learn: 0.1312474	test: 0.6135091	best: 0.6134868 (5192)	total: 14m 22s	remaining: 40m 53s
+8080.7s	317	5400:	learn: 0.1281216	test: 0.6134028	best: 0.6133821 (5336)	total: 14m 55s	remaining: 40m 20s
+8114.0s	318	5600:	learn: 0.1252158	test: 0.6132803	best: 0.6132284 (5545)	total: 15m 28s	remaining: 39m 47s
+8147.6s	319	5800:	learn: 0.1223428	test: 0.6132636	best: 0.6132284 (5545)	total: 16m 2s	remaining: 39m 15s
+8180.9s	320	6000:	learn: 0.1196923	test: 0.6131673	best: 0.6131546 (5994)	total: 16m 35s	remaining: 38m 42s
+8214.2s	321	6200:	learn: 0.1171165	test: 0.6131418	best: 0.6131269 (6160)	total: 17m 8s	remaining: 38m 9s
+8247.6s	322	6400:	learn: 0.1146108	test: 0.6131235	best: 0.6130557 (6334)	total: 17m 42s	remaining: 37m 36s
+8281.7s	323	6600:	learn: 0.1122054	test: 0.6129977	best: 0.6129903 (6598)	total: 18m 16s	remaining: 37m 4s
+8314.9s	324	6800:	learn: 0.1100675	test: 0.6129219	best: 0.6128942 (6769)	total: 18m 49s	remaining: 36m 31s
+8347.6s	325	7000:	learn: 0.1080492	test: 0.6127210	best: 0.6127112 (6999)	total: 19m 21s	remaining: 35m 57s
+8380.7s	326	7200:	learn: 0.1060825	test: 0.6127173	best: 0.6127059 (7061)	total: 19m 54s	remaining: 35m 23s
+8413.9s	327	7400:	learn: 0.1042016	test: 0.6126543	best: 0.6126410 (7390)	total: 20m 28s	remaining: 34m 50s
+8446.8s	328	7600:	learn: 0.1024091	test: 0.6125877	best: 0.6125612 (7582)	total: 21m 1s	remaining: 34m 17s
+8479.6s	329	7800:	learn: 0.1005924	test: 0.6124296	best: 0.6124186 (7798)	total: 21m 33s	remaining: 33m 43s
+8513.3s	330	8000:	learn: 0.0988041	test: 0.6123568	best: 0.6123458 (7967)	total: 22m 7s	remaining: 33m 10s
+8546.6s	331	8200:	learn: 0.0971889	test: 0.6123269	best: 0.6123134 (8180)	total: 22m 40s	remaining: 32m 37s
+8579.2s	332	8400:	learn: 0.0956444	test: 0.6123722	best: 0.6123040 (8300)	total: 23m 13s	remaining: 32m 3s
+8611.7s	333	8600:	learn: 0.0942045	test: 0.6122960	best: 0.6122898 (8586)	total: 23m 45s	remaining: 31m 29s
+8644.9s	334	8800:	learn: 0.0927146	test: 0.6122700	best: 0.6122360 (8681)	total: 24m 18s	remaining: 30m 56s
+8677.9s	335	9000:	learn: 0.0913192	test: 0.6122004	best: 0.6121958 (8964)	total: 24m 51s	remaining: 30m 23s
+8711.6s	336	9200:	learn: 0.0899103	test: 0.6120778	best: 0.6120698 (9165)	total: 25m 25s	remaining: 29m 50s
+8744.8s	337	9400:	learn: 0.0886354	test: 0.6120400	best: 0.6120276 (9383)	total: 25m 58s	remaining: 29m 17s
+8777.5s	338	9600:	learn: 0.0873889	test: 0.6120217	best: 0.6119949 (9573)	total: 26m 31s	remaining: 28m 43s
+8810.2s	339	9800:	learn: 0.0861779	test: 0.6119141	best: 0.6119091 (9795)	total: 27m 4s	remaining: 28m 10s
+8844.0s	340	10000:	learn: 0.0849674	test: 0.6118648	best: 0.6118341 (9933)	total: 27m 37s	remaining: 27m 37s
+8876.7s	341	10200:	learn: 0.0838227	test: 0.6118666	best: 0.6118308 (10128)	total: 28m 10s	remaining: 27m 3s
+8909.6s	342	10400:	learn: 0.0826945	test: 0.6117881	best: 0.6117881 (10400)	total: 28m 43s	remaining: 26m 30s
+8942.8s	343	10600:	learn: 0.0816154	test: 0.6118041	best: 0.6117844 (10508)	total: 29m 16s	remaining: 25m 57s
+8976.0s	344	10800:	learn: 0.0805348	test: 0.6118339	best: 0.6117607 (10671)	total: 29m 49s	remaining: 25m 24s
+9008.8s	345	11000:	learn: 0.0794867	test: 0.6117453	best: 0.6117395 (10990)	total: 30m 22s	remaining: 24m 50s
+9041.0s	346	11200:	learn: 0.0785634	test: 0.6117497	best: 0.6117300 (11190)	total: 30m 54s	remaining: 24m 16s
+9073.6s	347	11400:	learn: 0.0776154	test: 0.6116787	best: 0.6116787 (11400)	total: 31m 27s	remaining: 23m 43s
+9106.2s	348	11600:	learn: 0.0766833	test: 0.6116102	best: 0.6115838 (11555)	total: 31m 59s	remaining: 23m 9s
+9138.3s	349	11800:	learn: 0.0757534	test: 0.6115750	best: 0.6115716 (11799)	total: 32m 31s	remaining: 22m 36s
+9170.3s	350	12000:	learn: 0.0748865	test: 0.6115031	best: 0.6114916 (11975)	total: 33m 3s	remaining: 22m 2s
+9203.0s	351	12200:	learn: 0.0739769	test: 0.6114412	best: 0.6114337 (12177)	total: 33m 36s	remaining: 21m 28s
+9235.3s	352	12400:	learn: 0.0731366	test: 0.6114164	best: 0.6114069 (12346)	total: 34m 8s	remaining: 20m 55s
+9267.7s	353	12600:	learn: 0.0722899	test: 0.6113561	best: 0.6113487 (12574)	total: 34m 41s	remaining: 20m 22s
+9299.7s	354	12800:	learn: 0.0715289	test: 0.6113687	best: 0.6113461 (12784)	total: 35m 13s	remaining: 19m 48s
+9332.9s	355	13000:	learn: 0.0706836	test: 0.6112848	best: 0.6112848 (13000)	total: 35m 46s	remaining: 19m 15s
+9365.3s	356	13200:	learn: 0.0699275	test: 0.6112872	best: 0.6112581 (13176)	total: 36m 18s	remaining: 18m 42s
+9397.4s	357	13400:	learn: 0.0691633	test: 0.6112388	best: 0.6112388 (13400)	total: 36m 50s	remaining: 18m 8s
+9430.1s	358	13600:	learn: 0.0684153	test: 0.6111877	best: 0.6111677 (13497)	total: 37m 23s	remaining: 17m 35s
+9462.3s	359	13800:	learn: 0.0677132	test: 0.6111824	best: 0.6111518 (13696)	total: 37m 55s	remaining: 17m 2s
+9495.1s	360	14000:	learn: 0.0670010	test: 0.6111686	best: 0.6111204 (13918)	total: 38m 28s	remaining: 16m 29s
+9527.1s	361	14200:	learn: 0.0663214	test: 0.6111579	best: 0.6111204 (13918)	total: 39m	remaining: 15m 55s
+9559.7s	362	14400:	learn: 0.0656313	test: 0.6110947	best: 0.6110904 (14395)	total: 39m 32s	remaining: 15m 22s
+9592.0s	363	14600:	learn: 0.0649704	test: 0.6110791	best: 0.6110729 (14449)	total: 40m 5s	remaining: 14m 49s
+9624.8s	364	14800:	learn: 0.0643289	test: 0.6110649	best: 0.6110464 (14748)	total: 40m 37s	remaining: 14m 16s
+9657.4s	365	15000:	learn: 0.0636988	test: 0.6111171	best: 0.6110464 (14748)	total: 41m 10s	remaining: 13m 43s
+9690.4s	366	15200:	learn: 0.0630694	test: 0.6110882	best: 0.6110464 (14748)	total: 41m 43s	remaining: 13m 10s
+9698.4s	367	Stopped by overfitting detector  (500 iterations wait)
+9698.4s	368	
+9698.4s	369	bestTest = 0.611046403
+9698.4s	370	bestIteration = 14748
+9698.4s	371	
+9698.4s	372	Shrink model to first 14749 iterations.
+9701.1s	373	Fold 4 RMSE: 0.66073
+9701.1s	374	
+9701.1s	375	Fold 5/5 — train 450,340 | val 112,582
+9703.1s	376	0:	learn: 4.3628504	test: 4.3964074	best: 4.3964074 (0)	total: 224ms	remaining: 1h 14m 43s
+9735.4s	377	200:	learn: 0.6038986	test: 0.7436448	best: 0.7436448 (200)	total: 32.5s	remaining: 53m 17s
+9767.6s	378	400:	learn: 0.4883133	test: 0.7184863	best: 0.7184863 (400)	total: 1m 4s	remaining: 52m 36s
+9801.1s	379	600:	learn: 0.4197776	test: 0.7053474	best: 0.7053184 (599)	total: 1m 38s	remaining: 52m 44s
+9834.7s	380	800:	learn: 0.3730080	test: 0.6984177	best: 0.6984100 (795)	total: 2m 11s	remaining: 52m 34s
+9867.6s	381	1000:	learn: 0.3390075	test: 0.6951899	best: 0.6949982 (985)	total: 2m 44s	remaining: 52m 2s
+9901.0s	382	1200:	learn: 0.3117645	test: 0.6927839	best: 0.6927777 (1199)	total: 3m 17s	remaining: 51m 36s
+9934.7s	383	1400:	learn: 0.2892595	test: 0.6906073	best: 0.6905720 (1398)	total: 3m 51s	remaining: 51m 14s
+9968.9s	384	1600:	learn: 0.2713859	test: 0.6891681	best: 0.6891681 (1600)	total: 4m 25s	remaining: 50m 53s
+10003.1s	385	1800:	learn: 0.2555460	test: 0.6878988	best: 0.6878101 (1775)	total: 4m 59s	remaining: 50m 30s
+10037.2s	386	2000:	learn: 0.2418445	test: 0.6870265	best: 0.6870238 (1999)	total: 5m 33s	remaining: 50m 3s
+10071.6s	387	2200:	learn: 0.2296975	test: 0.6859691	best: 0.6859458 (2196)	total: 6m 8s	remaining: 49m 37s
+10105.4s	388	2400:	learn: 0.2191211	test: 0.6848188	best: 0.6848188 (2400)	total: 6m 42s	remaining: 49m 6s
+10139.1s	389	2600:	learn: 0.2099867	test: 0.6840351	best: 0.6839858 (2580)	total: 7m 15s	remaining: 48m 35s
+10173.3s	390	2800:	learn: 0.2016735	test: 0.6832896	best: 0.6832610 (2793)	total: 7m 49s	remaining: 48m 5s
+10206.8s	391	3000:	learn: 0.1939152	test: 0.6830717	best: 0.6829198 (2983)	total: 8m 23s	remaining: 47m 30s
+10240.1s	392	3200:	learn: 0.1869759	test: 0.6822078	best: 0.6821661 (3193)	total: 8m 56s	remaining: 46m 56s
+10273.7s	393	3400:	learn: 0.1805494	test: 0.6816745	best: 0.6816740 (3395)	total: 9m 30s	remaining: 46m 22s
+10307.3s	394	3600:	learn: 0.1746143	test: 0.6811161	best: 0.6811001 (3598)	total: 10m 3s	remaining: 45m 49s
+10340.9s	395	3800:	learn: 0.1690497	test: 0.6807257	best: 0.6806788 (3738)	total: 10m 37s	remaining: 45m 16s
+10373.8s	396	4000:	learn: 0.1641192	test: 0.6805003	best: 0.6804477 (3998)	total: 11m 10s	remaining: 44m 39s
+10407.2s	397	4200:	learn: 0.1592688	test: 0.6803552	best: 0.6802996 (4106)	total: 11m 43s	remaining: 44m 5s
+10440.1s	398	4400:	learn: 0.1548459	test: 0.6799901	best: 0.6799774 (4387)	total: 12m 16s	remaining: 43m 30s
+10473.2s	399	4600:	learn: 0.1508129	test: 0.6796100	best: 0.6795971 (4591)	total: 12m 49s	remaining: 42m 55s
+10506.7s	400	4800:	learn: 0.1468285	test: 0.6792725	best: 0.6792670 (4797)	total: 13m 22s	remaining: 42m 21s
+10539.8s	401	5000:	learn: 0.1431548	test: 0.6788109	best: 0.6788045 (4980)	total: 13m 56s	remaining: 41m 47s
+10573.3s	402	5200:	learn: 0.1397079	test: 0.6788225	best: 0.6787205 (5029)	total: 14m 29s	remaining: 41m 14s
+10606.6s	403	5400:	learn: 0.1364408	test: 0.6786301	best: 0.6786299 (5370)	total: 15m 2s	remaining: 40m 40s
+10639.6s	404	5600:	learn: 0.1333388	test: 0.6784343	best: 0.6784035 (5589)	total: 15m 35s	remaining: 40m 5s
+10672.8s	405	5800:	learn: 0.1303755	test: 0.6782155	best: 0.6782155 (5800)	total: 16m 8s	remaining: 39m 31s
+10705.5s	406	6000:	learn: 0.1276815	test: 0.6779540	best: 0.6779540 (6000)	total: 16m 41s	remaining: 38m 56s
+10738.0s	407	6200:	learn: 0.1251785	test: 0.6779914	best: 0.6778872 (6153)	total: 17m 14s	remaining: 38m 21s
+10771.2s	408	6400:	learn: 0.1225658	test: 0.6778250	best: 0.6777984 (6358)	total: 17m 47s	remaining: 37m 47s
+10804.4s	409	6600:	learn: 0.1201897	test: 0.6777128	best: 0.6777128 (6600)	total: 18m 20s	remaining: 37m 13s
+10837.2s	410	6800:	learn: 0.1178902	test: 0.6775076	best: 0.6775030 (6799)	total: 18m 53s	remaining: 36m 39s
+10870.2s	411	7000:	learn: 0.1156601	test: 0.6773131	best: 0.6773131 (7000)	total: 19m 26s	remaining: 36m 5s
+10903.1s	412	7200:	learn: 0.1135650	test: 0.6771798	best: 0.6771790 (7193)	total: 19m 58s	remaining: 35m 31s
+10936.2s	413	7400:	learn: 0.1114876	test: 0.6771426	best: 0.6771228 (7369)	total: 20m 31s	remaining: 34m 57s
+10968.8s	414	7600:	learn: 0.1095326	test: 0.6770752	best: 0.6770752 (7600)	total: 21m 4s	remaining: 34m 22s
+11000.9s	415	7800:	learn: 0.1078105	test: 0.6770337	best: 0.6769823 (7758)	total: 21m 36s	remaining: 33m 47s
+11034.0s	416	8000:	learn: 0.1060054	test: 0.6767979	best: 0.6767951 (7978)	total: 22m 9s	remaining: 33m 14s
+11066.7s	417	8200:	learn: 0.1042778	test: 0.6766815	best: 0.6766487 (8148)	total: 22m 42s	remaining: 32m 40s
+11099.8s	418	8400:	learn: 0.1026342	test: 0.6764814	best: 0.6764736 (8395)	total: 23m 15s	remaining: 32m 6s
+11132.6s	419	8600:	learn: 0.1010379	test: 0.6763647	best: 0.6763647 (8600)	total: 23m 48s	remaining: 31m 32s
+11165.6s	420	8800:	learn: 0.0994623	test: 0.6762726	best: 0.6762726 (8800)	total: 24m 21s	remaining: 30m 59s
+11197.8s	421	9000:	learn: 0.0980068	test: 0.6762507	best: 0.6762506 (8998)	total: 24m 53s	remaining: 30m 24s
+11230.9s	422	9200:	learn: 0.0965943	test: 0.6762683	best: 0.6762381 (9174)	total: 25m 26s	remaining: 29m 51s
+11264.0s	423	9400:	learn: 0.0952629	test: 0.6761564	best: 0.6761564 (9400)	total: 25m 59s	remaining: 29m 18s
+11296.6s	424	9600:	learn: 0.0939107	test: 0.6761469	best: 0.6761406 (9586)	total: 26m 32s	remaining: 28m 44s
+11329.0s	425	9800:	learn: 0.0926296	test: 0.6761352	best: 0.6760867 (9745)	total: 27m 4s	remaining: 28m 10s
+11361.8s	426	10000:	learn: 0.0913684	test: 0.6760965	best: 0.6760523 (9960)	total: 27m 37s	remaining: 27m 36s
+11394.2s	427	10200:	learn: 0.0901935	test: 0.6760901	best: 0.6760523 (9960)	total: 28m 9s	remaining: 27m 2s
+11427.2s	428	10400:	learn: 0.0889879	test: 0.6759564	best: 0.6759527 (10398)	total: 28m 42s	remaining: 26m 29s
+11459.7s	429	10600:	learn: 0.0878834	test: 0.6758790	best: 0.6758720 (10579)	total: 29m 14s	remaining: 25m 55s
+11492.7s	430	10800:	learn: 0.0867822	test: 0.6758011	best: 0.6757965 (10768)	total: 29m 47s	remaining: 25m 22s
+11525.4s	431	11000:	learn: 0.0856962	test: 0.6757332	best: 0.6757154 (10978)	total: 30m 20s	remaining: 24m 49s
+11558.2s	432	11200:	learn: 0.0846346	test: 0.6756414	best: 0.6756278 (11180)	total: 30m 53s	remaining: 24m 15s
+11590.3s	433	11400:	learn: 0.0836476	test: 0.6755790	best: 0.6755715 (11391)	total: 31m 25s	remaining: 23m 42s
+11623.0s	434	11600:	learn: 0.0826470	test: 0.6755199	best: 0.6754524 (11584)	total: 31m 58s	remaining: 23m 8s
+11655.9s	435	11800:	learn: 0.0816886	test: 0.6755153	best: 0.6754524 (11584)	total: 32m 30s	remaining: 22m 35s
+11688.6s	436	12000:	learn: 0.0807411	test: 0.6754852	best: 0.6754524 (11584)	total: 33m 3s	remaining: 22m 2s
+11721.3s	437	12200:	learn: 0.0798320	test: 0.6753958	best: 0.6753887 (12185)	total: 33m 36s	remaining: 21m 28s
+11754.1s	438	12400:	learn: 0.0789262	test: 0.6752902	best: 0.6752886 (12397)	total: 34m 8s	remaining: 20m 55s
+11786.8s	439	12600:	learn: 0.0780077	test: 0.6752814	best: 0.6752768 (12586)	total: 34m 41s	remaining: 20m 22s
+11819.6s	440	12800:	learn: 0.0771177	test: 0.6752985	best: 0.6752735 (12701)	total: 35m 14s	remaining: 19m 49s
+11852.2s	441	13000:	learn: 0.0762845	test: 0.6752252	best: 0.6752141 (12992)	total: 35m 46s	remaining: 19m 15s
+11884.8s	442	13200:	learn: 0.0754547	test: 0.6751853	best: 0.6751696 (13088)	total: 36m 19s	remaining: 18m 42s
+11917.2s	443	13400:	learn: 0.0746421	test: 0.6751243	best: 0.6751234 (13398)	total: 36m 51s	remaining: 18m 9s
+11949.7s	444	13600:	learn: 0.0738889	test: 0.6750898	best: 0.6750659 (13540)	total: 37m 24s	remaining: 17m 35s
+11981.6s	445	13800:	learn: 0.0731266	test: 0.6750549	best: 0.6750466 (13770)	total: 37m 56s	remaining: 17m 2s
+12013.8s	446	14000:	learn: 0.0723829	test: 0.6750494	best: 0.6750037 (13933)	total: 38m 28s	remaining: 16m 29s
+12045.7s	447	14200:	learn: 0.0716679	test: 0.6749419	best: 0.6749406 (14198)	total: 39m	remaining: 15m 55s
+12077.7s	448	14400:	learn: 0.0709923	test: 0.6748404	best: 0.6748404 (14400)	total: 39m 32s	remaining: 15m 22s
+12109.7s	449	14600:	learn: 0.0702884	test: 0.6747713	best: 0.6747561 (14538)	total: 40m 4s	remaining: 14m 49s
+12141.8s	450	14800:	learn: 0.0696207	test: 0.6747885	best: 0.6747477 (14659)	total: 40m 36s	remaining: 14m 15s
+12174.3s	451	15000:	learn: 0.0689452	test: 0.6747244	best: 0.6747057 (14933)	total: 41m 8s	remaining: 13m 42s
+12206.0s	452	15200:	learn: 0.0683075	test: 0.6747086	best: 0.6747056 (15034)	total: 41m 40s	remaining: 13m 9s
+12237.7s	453	15400:	learn: 0.0676960	test: 0.6746330	best: 0.6746321 (15398)	total: 42m 12s	remaining: 12m 36s
+12269.8s	454	15600:	learn: 0.0670900	test: 0.6746196	best: 0.6746176 (15597)	total: 42m 44s	remaining: 12m 3s
+12301.8s	455	15800:	learn: 0.0665072	test: 0.6746106	best: 0.6746106 (15800)	total: 43m 16s	remaining: 11m 29s
+12333.9s	456	16000:	learn: 0.0659170	test: 0.6746265	best: 0.6746053 (15821)	total: 43m 48s	remaining: 10m 56s
+12365.9s	457	16200:	learn: 0.0653272	test: 0.6746175	best: 0.6746053 (15821)	total: 44m 20s	remaining: 10m 23s
+12398.3s	458	16400:	learn: 0.0647664	test: 0.6746149	best: 0.6745904 (16297)	total: 44m 52s	remaining: 9m 50s
+12430.9s	459	16600:	learn: 0.0642162	test: 0.6746424	best: 0.6745904 (16297)	total: 45m 25s	remaining: 9m 17s
+12462.8s	460	Stopped by overfitting detector  (500 iterations wait)
+12462.8s	461	
+12462.8s	462	bestTest = 0.674590406
+12462.8s	463	bestIteration = 16297
+12462.8s	464	
+12462.8s	465	Shrink model to first 16298 iterations.
+12464.9s	466	0:	learn: 3.4703867	test: 3.4721861	best: 3.4721861 (0)	total: 244ms	remaining: 1h 21m 24s
+12498.1s	467	200:	learn: 0.5621266	test: 0.7123012	best: 0.7123012 (200)	total: 33.4s	remaining: 54m 51s
+12530.9s	468	400:	learn: 0.4567185	test: 0.6839811	best: 0.6839811 (400)	total: 1m 6s	remaining: 53m 52s
+12563.8s	469	600:	learn: 0.3944294	test: 0.6748562	best: 0.6747581 (599)	total: 1m 38s	remaining: 53m 15s
+12596.6s	470	800:	learn: 0.3520010	test: 0.6705035	best: 0.6702524 (793)	total: 2m 11s	remaining: 52m 38s
+12629.9s	471	1000:	learn: 0.3195026	test: 0.6666788	best: 0.6666788 (1000)	total: 2m 45s	remaining: 52m 13s
+12663.7s	472	1200:	learn: 0.2947324	test: 0.6632400	best: 0.6632400 (1200)	total: 3m 18s	remaining: 51m 52s
+12696.9s	473	1400:	learn: 0.2744224	test: 0.6625151	best: 0.6624613 (1373)	total: 3m 52s	remaining: 51m 20s
+12730.6s	474	1600:	learn: 0.2571096	test: 0.6610871	best: 0.6610052 (1599)	total: 4m 25s	remaining: 50m 52s
+12764.6s	475	1800:	learn: 0.2424587	test: 0.6597236	best: 0.6596108 (1790)	total: 4m 59s	remaining: 50m 28s
+12797.9s	476	2000:	learn: 0.2300909	test: 0.6587108	best: 0.6587108 (2000)	total: 5m 32s	remaining: 49m 54s
+12832.0s	477	2200:	learn: 0.2185816	test: 0.6573558	best: 0.6573558 (2200)	total: 6m 6s	remaining: 49m 27s
+12865.5s	478	2400:	learn: 0.2084143	test: 0.6566096	best: 0.6566036 (2399)	total: 6m 40s	remaining: 48m 54s
+12899.4s	479	2600:	learn: 0.1991259	test: 0.6562119	best: 0.6560740 (2575)	total: 7m 14s	remaining: 48m 25s
+12932.7s	480	2800:	learn: 0.1912395	test: 0.6554444	best: 0.6554387 (2797)	total: 7m 47s	remaining: 47m 50s
+12966.7s	481	3000:	learn: 0.1838792	test: 0.6546375	best: 0.6546231 (2997)	total: 8m 21s	remaining: 47m 20s
+13000.9s	482	3200:	learn: 0.1771444	test: 0.6542279	best: 0.6541165 (3180)	total: 8m 55s	remaining: 46m 50s
+13034.7s	483	3400:	learn: 0.1709909	test: 0.6537027	best: 0.6537027 (3400)	total: 9m 29s	remaining: 46m 19s
+13068.6s	484	3600:	learn: 0.1651704	test: 0.6529410	best: 0.6529410 (3600)	total: 10m 3s	remaining: 45m 47s
+13102.0s	485	3800:	learn: 0.1598722	test: 0.6526244	best: 0.6526244 (3800)	total: 10m 36s	remaining: 45m 13s
+13135.2s	486	4000:	learn: 0.1551532	test: 0.6524971	best: 0.6523806 (3924)	total: 11m 9s	remaining: 44m 38s
+13169.5s	487	4200:	learn: 0.1503926	test: 0.6524359	best: 0.6523806 (3924)	total: 11m 44s	remaining: 44m 7s
+13203.1s	488	4400:	learn: 0.1461019	test: 0.6523079	best: 0.6522809 (4376)	total: 12m 17s	remaining: 43m 34s
+13236.5s	489	4600:	learn: 0.1420784	test: 0.6521084	best: 0.6521074 (4598)	total: 12m 51s	remaining: 43m
+13270.1s	490	4800:	learn: 0.1384133	test: 0.6520449	best: 0.6520449 (4800)	total: 13m 24s	remaining: 42m 27s
+13303.1s	491	5000:	learn: 0.1349726	test: 0.6517669	best: 0.6517591 (4997)	total: 13m 57s	remaining: 41m 52s
+13336.2s	492	5200:	learn: 0.1317963	test: 0.6515448	best: 0.6515190 (5186)	total: 14m 30s	remaining: 41m 17s
+13369.9s	493	5400:	learn: 0.1285852	test: 0.6515516	best: 0.6514789 (5358)	total: 15m 4s	remaining: 40m 44s
+13402.8s	494	5600:	learn: 0.1257219	test: 0.6513259	best: 0.6513074 (5582)	total: 15m 37s	remaining: 40m 9s
+13436.1s	495	5800:	learn: 0.1229364	test: 0.6514155	best: 0.6513074 (5582)	total: 16m 10s	remaining: 39m 35s
+13469.7s	496	6000:	learn: 0.1201562	test: 0.6512087	best: 0.6511167 (5902)	total: 16m 44s	remaining: 39m 2s
+13502.9s	497	6200:	learn: 0.1176098	test: 0.6510958	best: 0.6510672 (6116)	total: 17m 17s	remaining: 38m 27s
+13536.2s	498	6400:	learn: 0.1151705	test: 0.6510654	best: 0.6510334 (6310)	total: 17m 50s	remaining: 37m 54s
+13569.1s	499	6600:	learn: 0.1128725	test: 0.6510877	best: 0.6510334 (6310)	total: 18m 23s	remaining: 37m 19s
+13602.6s	500	6800:	learn: 0.1106690	test: 0.6511521	best: 0.6510334 (6310)	total: 18m 56s	remaining: 36m 46s
+13604.2s	501	Stopped by overfitting detector  (500 iterations wait)
+13604.2s	502	
+13604.2s	503	bestTest = 0.6510333947
+13604.2s	504	bestIteration = 6310
+13604.2s	505	
+13604.2s	506	Shrink model to first 6311 iterations.
+13606.4s	507	Fold 5 RMSE: 0.66274
+13606.4s	508	
+13606.4s	509	Per-fold RMSE: ['0.65578', '0.68340', '0.76508', '0.66073', '0.66274']
+13606.4s	510	Mean ± std: 0.68555 ± 0.04087
+13613.1s	511	CatBoost RMSE: 0.68555
+13613.1s	512	Residual X std: 0.73664, Residual Y std: 0.65169
+13613.1s	513	Training XGBoost on residuals...
+13613.1s	514	Using GroupKFold by (game_id,play_id,nfl_id).
+13613.5s	515	
+13613.5s	516	XGBoost Fold 1/5 — train 450,339 | val 112,583
+13643.8s	517	XGBoost Fold 1 RMSE: 0.65619
+13643.8s	518	
+13643.8s	519	XGBoost Fold 2/5 — train 450,339 | val 112,583
+13680.0s	520	XGBoost Fold 2 RMSE: 0.66989
+13680.0s	521	
+13680.0s	522	XGBoost Fold 3/5 — train 450,335 | val 112,587
+13714.8s	523	XGBoost Fold 3 RMSE: 0.79379
+13714.8s	524	
+13714.8s	525	XGBoost Fold 4/5 — train 450,335 | val 112,587
+13745.4s	526	XGBoost Fold 4 RMSE: 0.66176
+13745.4s	527	
+13745.4s	528	XGBoost Fold 5/5 — train 450,340 | val 112,582
+13775.7s	529	XGBoost Fold 5 RMSE: 0.66368
+13775.7s	530	
+13775.7s	531	XGBoost Per-fold RMSE: ['0.65619', '0.66989', '0.79379', '0.66176', '0.66368']
+13775.7s	532	XGBoost Mean ± std: 0.68906 ± 0.05255
+13775.7s	533	Training LightGBM on residuals...
+13775.7s	534	Using GroupKFold by (game_id,play_id,nfl_id).
+13776.0s	535	
+13776.0s	536	LightGBM Fold 1/5 — train 450,339 | val 112,583
+13779.4s	537	Training until validation scores don't improve for 100 rounds
+13783.9s	538	Early stopping, best iteration is:
+13783.9s	539	[2]	valid_0's rmse: 0.672718
+13787.2s	540	Training until validation scores don't improve for 100 rounds
+13791.9s	541	Early stopping, best iteration is:
+13791.9s	542	[2]	valid_0's rmse: 0.638413
+13792.2s	543	LightGBM Fold 1 RMSE: 0.65707
+13792.2s	544	
+13792.2s	545	LightGBM Fold 2/5 — train 450,339 | val 112,583
+13795.6s	546	Training until validation scores don't improve for 100 rounds
+13800.9s	547	Early stopping, best iteration is:
+13800.9s	548	[19]	valid_0's rmse: 0.694907
+13804.2s	549	Training until validation scores don't improve for 100 rounds
+13809.5s	550	Early stopping, best iteration is:
+13809.5s	551	[17]	valid_0's rmse: 0.633706
+13809.7s	552	LightGBM Fold 2 RMSE: 0.67818
+13809.7s	553	
+13809.7s	554	LightGBM Fold 3/5 — train 450,335 | val 112,587
+13813.1s	555	Training until validation scores don't improve for 100 rounds
+13818.7s	556	Early stopping, best iteration is:
+13818.7s	557	[29]	valid_0's rmse: 0.841191
+13822.0s	558	Training until validation scores don't improve for 100 rounds
+13827.5s	559	Early stopping, best iteration is:
+13827.5s	560	[24]	valid_0's rmse: 0.654941
+13827.7s	561	LightGBM Fold 3 RMSE: 0.77329
+13827.7s	562	
+13827.7s	563	LightGBM Fold 4/5 — train 450,335 | val 112,587
+13830.9s	564	Training until validation scores don't improve for 100 rounds
+13835.4s	565	Early stopping, best iteration is:
+13835.4s	566	[1]	valid_0's rmse: 0.709542
+13838.5s	567	Training until validation scores don't improve for 100 rounds
+13843.2s	568	Early stopping, best iteration is:
+13843.2s	569	[1]	valid_0's rmse: 0.612702
+13843.2s	570	LightGBM Fold 4 RMSE: 0.66212
+13843.2s	571	
+13843.2s	572	LightGBM Fold 5/5 — train 450,340 | val 112,582
+13846.6s	573	Training until validation scores don't improve for 100 rounds
+13851.2s	574	Early stopping, best iteration is:
+13851.2s	575	[1]	valid_0's rmse: 0.676888
+13854.3s	576	Training until validation scores don't improve for 100 rounds
+13858.8s	577	Early stopping, best iteration is:
+13858.8s	578	[1]	valid_0's rmse: 0.651196
+13858.8s	579	LightGBM Fold 5 RMSE: 0.66337
+13858.8s	580	
+13858.8s	581	LightGBM Per-fold RMSE: ['0.65707', '0.67818', '0.77329', '0.66212', '0.66337']
+13858.8s	582	LightGBM Mean ± std: 0.68681 ± 0.04381
+13859.9s	583	
+13859.9s	584	Residual Learning Performance:
+13859.9s	585	CatBoost (Primary) RMSE: 0.68555
+13859.9s	586	XGBoost (Residual) MSE: 0.46892
+13859.9s	587	LightGBM (Residual) MSE: 0.46422
+13859.9s	588	Residual Ensemble RMSE: 0.67764
+13860.7s	589	Saved: /kaggle/working/catboost_models_5fold_gnnlite.pkl
+13862.1s	590	Computing neighbor embeddings (test)…
+13863.6s	591	Saved: /kaggle/working/residual_ensemble_models_5fold_gnnlite.pkl
+13863.6s	592	Saved submission: /kaggle/working/submission.csv
+13863.6s	593	
+13863.6s	594	CV Mean ± std (absolute, with baseline added back): 0.67764 ± 0.00000
+13863.6s	595	Physics baseline (absolute): 4.23701
+13863.6s	596	
+13863.6s	597	==================================================
+13863.6s	598	NFL Big Data Bowl 2026 - Training Complete!
+13863.6s	599	Final CV Score: 0.67764 ± 0.00000
+13863.6s	600	Baseline Improvement: 3.55937
+13863.6s	601	==================================================
+13866.3s	602	/usr/local/lib/python3.11/dist-packages/traitlets/traitlets.py:2915: FutureWarning: --Exporter.preprocessors=["remove_papermill_header.RemovePapermillHeader"] for containers is deprecated in traitlets 5.0. You can pass `--Exporter.preprocessors item` ... multiple times to add items to a list.
+13866.3s	603	  warn(
+13866.4s	604	[NbConvertApp] Converting notebook __notebook__.ipynb to notebook
+13866.7s	605	[NbConvertApp] Writing 123645 bytes to __notebook__.ipynb
+13868.0s	606	/usr/local/lib/python3.11/dist-packages/traitlets/traitlets.py:2915: FutureWarning: --Exporter.preprocessors=["nbconvert.preprocessors.ExtractOutputPreprocessor"] for containers is deprecated in traitlets 5.0. You can pass `--Exporter.preprocessors item` ... multiple times to add items to a list.
+13868.0s	607	  warn(
+13868.0s	608	[NbConvertApp] Converting notebook __notebook__.ipynb to html
+13868.9s	609	[NbConvertApp] Writing 566954 bytes to __results__.html

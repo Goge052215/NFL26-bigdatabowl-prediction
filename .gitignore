@@ -1,0 +1,11 @@
+# Ignore heavy artifacts and derived files
+working/
+nn/working/
+nn/outputs/
+outputs/
+*.pkl
+catboost_info/
+__pycache__/
+*.pyc
+# TensorBoard & tfevents
+**/events.out.tfevents
