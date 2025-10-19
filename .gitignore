@@ -3,7 +3,7 @@ working/
 nn/working/
 nn/outputs/
 outputs/
-*.pkl
+
 catboost_info/
 __pycache__/
 *.pyc
@@ -11,6 +11,4 @@ __pycache__/
 **/events.out.tfevents
 
 # Ignore cache directories and large data files
-nn/data_npy/
-**/data_npy/
 *.npy
