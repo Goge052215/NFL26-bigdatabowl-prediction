@@ -9,3 +9,8 @@ __pycache__/
 *.pyc
 # TensorBoard & tfevents
 **/events.out.tfevents
+
+# Ignore cache directories and large data files
+nn/data_npy/
+**/data_npy/
+*.npy
