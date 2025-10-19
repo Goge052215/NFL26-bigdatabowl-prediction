@@ -1,4 +1,4 @@
-# V6
+# V5 - RMSE: 0.598
 
 import torch
 import torch.nn as nn
@@ -38,12 +38,27 @@ class Config:
     FIELD_X_MIN, FIELD_X_MAX = 0.0, 120.0
     FIELD_Y_MIN, FIELD_Y_MAX = 0.0, 53.3
     
-    # GNN-lite parameters
+    # GNN-lite parameters - Enhanced
     K_NEIGH = 5
     RADIUS = 15.0
     TAU = 6.0
     
-    DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    # Multi-scale spatial analysis
+    RADIUS_LOCAL = 8.0      # Close interactions (blocking, coverage)
+    RADIUS_MEDIUM = 15.0    # Medium range (route running, zone coverage)
+    RADIUS_GLOBAL = 25.0    # Long range (deep coverage, field awareness)
+    
+    # Temporal GNN parameters
+    TEMPORAL_WINDOW = 3     # Frames to look back for temporal neighbor analysis
+    TEMPORAL_DECAY = 0.8    # Decay factor for older frames
+    
+    # Formation analysis
+    FORMATION_RADIUS = 12.0 # Radius for formation cluster analysis
+    MIN_CLUSTER_SIZE = 3    # Minimum players for formation cluster
+    
+    DEVICE = torch.device(
+        "mps" if torch.backends.mps.is_available() else "cpu"
+    )
 
 def set_seed(seed=Config.SEED):
     import random
@@ -63,11 +78,12 @@ def height_to_feet(height_str):
     except:
         return 6.0
 
-# GNN-lite neighbor embedding computations
+# Enhanced GNN-lite neighbor embedding computations
 class GNNLiteProcessor:
     def compute_neighbor_embeddings(self, input_df: pd.DataFrame) -> pd.DataFrame:
         cols_needed = ["game_id","play_id","nfl_id","frame_id","x","y",
-                       "velocity_x","velocity_y","player_side"]
+                       "velocity_x","velocity_y","player_side","player_role",
+                       "s","a","dir","o"]
         src = input_df[cols_needed].copy()
 
         last = (src.sort_values(["game_id","play_id","nfl_id","frame_id"])
@@ -82,7 +98,8 @@ class GNNLiteProcessor:
                 "frame_id":"nb_frame_id", "nfl_id":"nfl_id_nb",
                 "x":"x_nb", "y":"y_nb",
                 "velocity_x":"vx_nb", "velocity_y":"vy_nb",
-                "player_side":"player_side_nb"
+                "player_side":"player_side_nb", "player_role":"player_role_nb",
+                "s":"s_nb", "a":"a_nb", "dir":"dir_nb", "o":"o_nb"
             }),
             left_on=["game_id","play_id","last_frame_id"],
             right_on=["game_id","play_id","nb_frame_id"],
@@ -98,6 +115,16 @@ class GNNLiteProcessor:
         tmp["dvx"] = tmp["vx_nb"] - tmp["velocity_x"]
         tmp["dvy"] = tmp["vy_nb"] - tmp["velocity_y"]
         tmp["dist"] = np.sqrt(tmp["dx"]**2 + tmp["dy"]**2)
+        
+        # Enhanced relative features
+        tmp["ds"] = tmp["s_nb"] - tmp["s"]  # Speed difference
+        tmp["da"] = tmp["a_nb"] - tmp["a"]  # Acceleration difference
+        tmp["ddir"] = tmp["dir_nb"] - tmp["dir"]  # Direction difference
+        tmp["do"] = tmp["o_nb"] - tmp["o"]  # Orientation difference
+        
+        # Handle direction wraparound
+        tmp["ddir"] = tmp["ddir"].apply(lambda x: x if abs(x) < 180 else x - 360 * np.sign(x))
+        tmp["do"] = tmp["do"].apply(lambda x: x if abs(x) < 180 else x - 360 * np.sign(x))
 
         tmp = tmp[np.isfinite(tmp["dist"])]
         tmp = tmp[tmp["dist"] > 1e-6]
@@ -106,6 +133,11 @@ class GNNLiteProcessor:
 
         # ally / opp flag
         tmp["is_ally"] = (tmp["player_side_nb"].fillna("") == tmp["player_side"].fillna("")).astype(np.float32)
+        
+        # Role-based interactions
+        tmp["is_receiver_nb"] = (tmp["player_role_nb"] == 'Targeted Receiver').astype(np.float32)
+        tmp["is_coverage_nb"] = (tmp["player_role_nb"] == 'Defensive Coverage').astype(np.float32)
+        tmp["is_passer_nb"] = (tmp["player_role_nb"] == 'Passer').astype(np.float32)
 
         # rank by distance (keep top-K)
         keys = ["game_id","play_id","nfl_id"]
@@ -122,14 +154,16 @@ class GNNLiteProcessor:
         tmp["wn_opp"]  = tmp["wn"] * (1.0 - tmp["is_ally"])
 
         # pre-multiply for group sums
-        for col in ["dx","dy","dvx","dvy"]:
+        for col in ["dx","dy","dvx","dvy","ds","da","ddir","do"]:
             tmp[f"{col}_ally_w"] = tmp[col] * tmp["wn_ally"]
             tmp[f"{col}_opp_w"]  = tmp[col] * tmp["wn_opp"]
 
         tmp["dist_ally"] = np.where(tmp["is_ally"] > 0.5, tmp["dist"], np.nan)
         tmp["dist_opp"]  = np.where(tmp["is_ally"] < 0.5, tmp["dist"], np.nan)
 
+        # Enhanced aggregations
         ag = tmp.groupby(keys).agg(
+            # Original features
             gnn_ally_dx_mean = ("dx_ally_w", "sum"),
             gnn_ally_dy_mean = ("dy_ally_w", "sum"),
             gnn_ally_dvx_mean= ("dvx_ally_w","sum"),
@@ -144,6 +178,21 @@ class GNNLiteProcessor:
             gnn_ally_dmean   = ("dist_ally", "mean"),
             gnn_opp_dmin     = ("dist_opp",  "min"),
             gnn_opp_dmean    = ("dist_opp",  "mean"),
+            
+            # Enhanced features - speed/acceleration/direction
+            gnn_ally_ds_mean = ("ds_ally_w", "sum"),
+            gnn_ally_da_mean = ("da_ally_w", "sum"),
+            gnn_ally_ddir_mean = ("ddir_ally_w", "sum"),
+            gnn_ally_do_mean = ("do_ally_w", "sum"),
+            gnn_opp_ds_mean = ("ds_opp_w", "sum"),
+            gnn_opp_da_mean = ("da_opp_w", "sum"),
+            gnn_opp_ddir_mean = ("ddir_opp_w", "sum"),
+            gnn_opp_do_mean = ("do_opp_w", "sum"),
+            
+            # Role-based neighbor counts
+            gnn_receiver_neighbors = ("is_receiver_nb", "sum"),
+            gnn_coverage_neighbors = ("is_coverage_nb", "sum"),
+            gnn_passer_neighbors = ("is_passer_nb", "sum"),
         ).reset_index()
 
         # d1..d3 nearest (regardless of side)
@@ -155,14 +204,255 @@ class GNNLiteProcessor:
 
         # safe fills
         for c in ["gnn_ally_dx_mean","gnn_ally_dy_mean","gnn_ally_dvx_mean","gnn_ally_dvy_mean",
-                  "gnn_opp_dx_mean","gnn_opp_dy_mean","gnn_opp_dvx_mean","gnn_opp_dvy_mean"]:
+                  "gnn_opp_dx_mean","gnn_opp_dy_mean","gnn_opp_dvx_mean","gnn_opp_dvy_mean",
+                  "gnn_ally_ds_mean","gnn_ally_da_mean","gnn_ally_ddir_mean","gnn_ally_do_mean",
+                  "gnn_opp_ds_mean","gnn_opp_da_mean","gnn_opp_ddir_mean","gnn_opp_do_mean"]:
             ag[c] = ag[c].fillna(0.0)
-        for c in ["gnn_ally_cnt","gnn_opp_cnt"]:
+        for c in ["gnn_ally_cnt","gnn_opp_cnt","gnn_receiver_neighbors","gnn_coverage_neighbors","gnn_passer_neighbors"]:
             ag[c] = ag[c].fillna(0.0)
         for c in ["gnn_ally_dmin","gnn_opp_dmin","gnn_ally_dmean","gnn_opp_dmean","gnn_d1","gnn_d2","gnn_d3"]:
             ag[c] = ag[c].fillna(Config.RADIUS if Config.RADIUS is not None else 30.0)
 
         return ag
+    
+    def compute_temporal_neighbor_features(self, input_df: pd.DataFrame) -> pd.DataFrame:
+        """Compute temporal neighbor features across multiple frames"""
+        cols_needed = ["game_id","play_id","nfl_id","frame_id","x","y",
+                       "velocity_x","velocity_y","player_side"]
+        src = input_df[cols_needed].copy()
+        src = src.sort_values(["game_id","play_id","nfl_id","frame_id"])
+        
+        # Get last few frames for each player
+        temporal_features = []
+        
+        for (game_id, play_id, nfl_id), group in src.groupby(["game_id","play_id","nfl_id"]):
+            if len(group) < Config.TEMPORAL_WINDOW:
+                continue
+                
+            # Take last TEMPORAL_WINDOW frames
+            recent_frames = group.tail(Config.TEMPORAL_WINDOW)
+            ego_last = recent_frames.iloc[-1]  # Most recent frame
+            
+            # For each frame in the temporal window
+            temporal_neighbor_data = []
+            for i, (_, ego_frame) in enumerate(recent_frames.iterrows()):
+                frame_id = ego_frame['frame_id']
+                
+                # Get all other players at this frame
+                frame_data = src[
+                    (src['game_id'] == game_id) & 
+                    (src['play_id'] == play_id) & 
+                    (src['frame_id'] == frame_id) &
+                    (src['nfl_id'] != nfl_id)
+                ].copy()
+                
+                if len(frame_data) == 0:
+                    continue
+                
+                # Calculate distances and relative features
+                frame_data['dx'] = frame_data['x'] - ego_frame['x']
+                frame_data['dy'] = frame_data['y'] - ego_frame['y']
+                frame_data['dist'] = np.sqrt(frame_data['dx']**2 + frame_data['dy']**2)
+                frame_data['dvx'] = frame_data['velocity_x'] - ego_frame['velocity_x']
+                frame_data['dvy'] = frame_data['velocity_y'] - ego_frame['velocity_y']
+                
+                # Filter by radius
+                frame_data = frame_data[frame_data['dist'] <= Config.RADIUS]
+                
+                if len(frame_data) == 0:
+                    continue
+                
+                # Apply temporal decay (older frames get less weight)
+                temporal_weight = Config.TEMPORAL_DECAY ** (Config.TEMPORAL_WINDOW - 1 - i)
+                frame_data['temporal_weight'] = temporal_weight
+                
+                # Ally/opponent classification
+                frame_data['is_ally'] = (
+                    frame_data['player_side'].fillna("") == ego_frame['player_side']
+                ).astype(np.float32)
+                
+                temporal_neighbor_data.append(frame_data)
+            
+            if not temporal_neighbor_data:
+                continue
+                
+            # Combine all temporal data
+            all_temporal = pd.concat(temporal_neighbor_data, ignore_index=True)
+            
+            # Compute temporal features
+            temporal_stats = {
+                'game_id': game_id,
+                'play_id': play_id,
+                'nfl_id': nfl_id,
+                
+                # Temporal neighbor stability (how consistent are neighbors across frames)
+                'gnn_temporal_neighbor_stability': len(set(all_temporal['nfl_id'])) / max(len(all_temporal), 1),
+                
+                # Average temporal distance changes
+                'gnn_temporal_avg_dist': (all_temporal['dist'] * all_temporal['temporal_weight']).sum() / all_temporal['temporal_weight'].sum() if len(all_temporal) > 0 else Config.RADIUS,
+                
+                # Temporal velocity alignment
+                'gnn_temporal_vel_alignment': (
+                    (all_temporal['dvx'] * all_temporal['dx'] + all_temporal['dvy'] * all_temporal['dy']) * 
+                    all_temporal['temporal_weight']
+                ).sum() / all_temporal['temporal_weight'].sum() if len(all_temporal) > 0 else 0.0,
+                
+                # Temporal ally/opponent ratios
+                'gnn_temporal_ally_ratio': (
+                    (all_temporal['is_ally'] * all_temporal['temporal_weight']).sum() / 
+                    all_temporal['temporal_weight'].sum() if len(all_temporal) > 0 else 0.0
+                ),
+            }
+            
+            temporal_features.append(temporal_stats)
+        
+        if not temporal_features:
+            return pd.DataFrame()
+            
+        return pd.DataFrame(temporal_features)
+    
+    def compute_multi_scale_features(self, input_df: pd.DataFrame) -> pd.DataFrame:
+        """Compute multi-scale spatial features with different radius thresholds"""
+        cols_needed = ["game_id","play_id","nfl_id","frame_id","x","y",
+                       "velocity_x","velocity_y","player_side"]
+        src = input_df[cols_needed].copy()
+
+        last = (src.sort_values(["game_id","play_id","nfl_id","frame_id"])
+                   .groupby(["game_id","play_id","nfl_id"], as_index=False)
+                   .tail(1)
+                   .rename(columns={"frame_id":"last_frame_id"})
+                   .reset_index(drop=True))
+
+        multi_scale_features = []
+        
+        for _, ego in last.iterrows():
+            # Get all neighbors at ego's last frame
+            neighbors = src[
+                (src['game_id'] == ego['game_id']) & 
+                (src['play_id'] == ego['play_id']) & 
+                (src['frame_id'] == ego['last_frame_id']) &
+                (src['nfl_id'] != ego['nfl_id'])
+            ].copy()
+            
+            if len(neighbors) == 0:
+                multi_scale_features.append({
+                    'game_id': ego['game_id'],
+                    'play_id': ego['play_id'], 
+                    'nfl_id': ego['nfl_id'],
+                    'gnn_local_density': 0.0,
+                    'gnn_medium_density': 0.0,
+                    'gnn_global_density': 0.0,
+                    'gnn_local_ally_ratio': 0.0,
+                    'gnn_medium_ally_ratio': 0.0,
+                    'gnn_global_ally_ratio': 0.0,
+                })
+                continue
+            
+            # Calculate distances
+            neighbors['dist'] = np.sqrt(
+                (neighbors['x'] - ego['x'])**2 + 
+                (neighbors['y'] - ego['y'])**2
+            )
+            neighbors['is_ally'] = (
+                neighbors['player_side'].fillna("") == ego['player_side']
+            ).astype(np.float32)
+            
+            # Multi-scale analysis
+            local_neighbors = neighbors[neighbors['dist'] <= Config.RADIUS_LOCAL]
+            medium_neighbors = neighbors[neighbors['dist'] <= Config.RADIUS_MEDIUM]
+            global_neighbors = neighbors[neighbors['dist'] <= Config.RADIUS_GLOBAL]
+            
+            features = {
+                'game_id': ego['game_id'],
+                'play_id': ego['play_id'],
+                'nfl_id': ego['nfl_id'],
+                
+                # Density at different scales
+                'gnn_local_density': len(local_neighbors) / (np.pi * Config.RADIUS_LOCAL**2) * 1000,  # per 1000 sq yards
+                'gnn_medium_density': len(medium_neighbors) / (np.pi * Config.RADIUS_MEDIUM**2) * 1000,
+                'gnn_global_density': len(global_neighbors) / (np.pi * Config.RADIUS_GLOBAL**2) * 1000,
+                
+                # Ally ratios at different scales
+                'gnn_local_ally_ratio': local_neighbors['is_ally'].mean() if len(local_neighbors) > 0 else 0.0,
+                'gnn_medium_ally_ratio': medium_neighbors['is_ally'].mean() if len(medium_neighbors) > 0 else 0.0,
+                'gnn_global_ally_ratio': global_neighbors['is_ally'].mean() if len(global_neighbors) > 0 else 0.0,
+            }
+            
+            multi_scale_features.append(features)
+        
+        return pd.DataFrame(multi_scale_features)
+    
+    def compute_formation_features(self, input_df: pd.DataFrame) -> pd.DataFrame:
+        """Compute formation-aware features including clustering and spacing"""
+        cols_needed = ["game_id","play_id","nfl_id","frame_id","x","y","player_side"]
+        src = input_df[cols_needed].copy()
+
+        last = (src.sort_values(["game_id","play_id","nfl_id","frame_id"])
+                   .groupby(["game_id","play_id","nfl_id"], as_index=False)
+                   .tail(1)
+                   .rename(columns={"frame_id":"last_frame_id"})
+                   .reset_index(drop=True))
+
+        formation_features = []
+        
+        # Group by play to analyze formations
+        for (game_id, play_id), play_group in last.groupby(['game_id', 'play_id']):
+            # Separate offense and defense
+            offense = play_group[play_group['player_side'] == 'Offense']
+            defense = play_group[play_group['player_side'] == 'Defense']
+            
+            for _, ego in play_group.iterrows():
+                teammates = offense if ego['player_side'] == 'Offense' else defense
+                opponents = defense if ego['player_side'] == 'Offense' else offense
+                
+                # Remove ego from teammates
+                teammates = teammates[teammates['nfl_id'] != ego['nfl_id']]
+                
+                features = {
+                    'game_id': game_id,
+                    'play_id': play_id,
+                    'nfl_id': ego['nfl_id'],
+                }
+                
+                # Formation compactness (average distance to teammates)
+                if len(teammates) > 0:
+                    teammate_dists = np.sqrt(
+                        (teammates['x'] - ego['x'])**2 + 
+                        (teammates['y'] - ego['y'])**2
+                    )
+                    features['gnn_formation_compactness'] = teammate_dists.mean()
+                    features['gnn_formation_spread'] = teammate_dists.std()
+                    
+                    # Formation clustering (teammates within formation radius)
+                    close_teammates = teammates[teammate_dists <= Config.FORMATION_RADIUS]
+                    features['gnn_formation_cluster_size'] = len(close_teammates)
+                    features['gnn_formation_isolation'] = 1.0 if len(close_teammates) == 0 else 0.0
+                else:
+                    features['gnn_formation_compactness'] = Config.FORMATION_RADIUS
+                    features['gnn_formation_spread'] = 0.0
+                    features['gnn_formation_cluster_size'] = 0.0
+                    features['gnn_formation_isolation'] = 1.0
+                
+                # Opposition pressure (closest opponents)
+                if len(opponents) > 0:
+                    opponent_dists = np.sqrt(
+                        (opponents['x'] - ego['x'])**2 + 
+                        (opponents['y'] - ego['y'])**2
+                    )
+                    features['gnn_pressure_closest'] = opponent_dists.min()
+                    features['gnn_pressure_avg'] = opponent_dists.mean()
+                    
+                    # Pressure intensity (opponents within pressure radius)
+                    pressure_opponents = opponents[opponent_dists <= Config.FORMATION_RADIUS]
+                    features['gnn_pressure_count'] = len(pressure_opponents)
+                else:
+                    features['gnn_pressure_closest'] = Config.FORMATION_RADIUS
+                    features['gnn_pressure_avg'] = Config.FORMATION_RADIUS
+                    features['gnn_pressure_count'] = 0.0
+                
+                formation_features.append(features)
+        
+        return pd.DataFrame(formation_features)
 
 def add_advanced_features(df):
     df = df.copy()
@@ -428,14 +718,36 @@ def prepare_sequences_with_advanced_features(input_df, output_df=None, test_temp
         # NEW: Physics (5) - V6
         'tangential_accel', 'lateral_accel', 'curvature', 'yaw_rate', 'mechanical_power',
         
-        # GNN LITE FEATURES (20)
+        # GNN LITE FEATURES - Enhanced (60+)
+        # Basic neighbor counts and distances
         'gnn_ally_cnt', 'gnn_opp_cnt',
         'gnn_ally_dx_mean', 'gnn_ally_dy_mean', 'gnn_ally_dvx_mean', 'gnn_ally_dvy_mean',
         'gnn_opp_dx_mean', 'gnn_opp_dy_mean', 'gnn_opp_dvx_mean', 'gnn_opp_dvy_mean',
-        'gnn_ally_dist_1', 'gnn_ally_dist_2', 'gnn_ally_dist_3',
-        'gnn_opp_dist_1', 'gnn_opp_dist_2', 'gnn_opp_dist_3',
-        'gnn_nearest_ally_dist', 'gnn_nearest_opp_dist',
-        'gnn_ally_attention_sum', 'gnn_opp_attention_sum',
+        'gnn_ally_dmin', 'gnn_ally_dmean', 'gnn_opp_dmin', 'gnn_opp_dmean',
+        'gnn_d1', 'gnn_d2', 'gnn_d3',
+        
+        # Enhanced relative features (speed, acceleration, direction, orientation)
+        'gnn_ally_ds_mean', 'gnn_ally_da_mean', 'gnn_ally_ddir_mean', 'gnn_ally_do_mean',
+        'gnn_opp_ds_mean', 'gnn_opp_da_mean', 'gnn_opp_ddir_mean', 'gnn_opp_do_mean',
+        
+        # Role-based neighbor counts
+        'gnn_receiver_neighbors', 'gnn_coverage_neighbors', 'gnn_passer_neighbors',
+        
+        # Temporal GNN features
+        'gnn_temporal_ally_persistence', 'gnn_temporal_opp_persistence',
+        'gnn_temporal_ally_velocity_consistency', 'gnn_temporal_opp_velocity_consistency',
+        'gnn_temporal_ally_formation_stability', 'gnn_temporal_opp_formation_stability',
+        'gnn_temporal_interaction_strength', 'gnn_temporal_neighbor_turnover',
+        
+        # Multi-scale spatial features
+        'gnn_local_ally_cnt', 'gnn_local_opp_cnt', 'gnn_local_density',
+        'gnn_medium_ally_cnt', 'gnn_medium_opp_cnt', 'gnn_medium_density',
+        'gnn_global_ally_cnt', 'gnn_global_opp_cnt', 'gnn_global_density',
+        'gnn_scale_ally_ratio', 'gnn_scale_opp_ratio', 'gnn_scale_density_gradient',
+        
+        # Formation features
+        'gnn_formation_compactness', 'gnn_formation_spread', 'gnn_formation_cluster_size',
+        'gnn_formation_isolation', 'gnn_pressure_closest', 'gnn_pressure_avg', 'gnn_pressure_count',
     ]
     
     # Filter to existing
@@ -594,7 +906,7 @@ class SeqModel(nn.Module):
         # Keep original multi-head attention as backup/ensemble option
         self.pool_ln = nn.LayerNorm(128)
         self.pool_attn = nn.MultiheadAttention(
-            128, num_heads=8,  # Changed from 3 to 8 (128 is divisible by 8)
+            128, num_heads=4, 
             batch_first=True
         )
         self.pool_query = nn.Parameter(torch.randn(1, 1, 128))
@@ -614,27 +926,20 @@ class SeqModel(nn.Module):
         self.pooling_weight = nn.Parameter(torch.tensor(0.5))
     
     def forward(self, x):
-        # Input normalization
-        x = self.input_ln(x)
-        
-        # Temporal CNN branch
-        x_conv = self.cnn(x.transpose(1, 2)).transpose(1, 2)  # (B, L, 128)
-        
-        # GRU encoding
-        h, _ = self.gru(x)  # (B, L, 128)
-        
-        # Residual fusion of GRU and CNN features
-        h = h + x_conv
+        # Transformer encoding
+        h, _ = self.gru(x)  # Shape: (batch_size, seq_len, 128)
         B = h.shape[0]
         
-        # Method 1: Attention pooling (CommonLit style)
-        attention_weights = self.attention_pooling(h)  # (B, L, 1)
-        context_vector_1 = torch.sum(attention_weights * h, dim=1)  # (B, 128)
+        # Method 1: Attention pooling
+        # Compute attention weights for each timestep
+        attention_weights = self.attention_pooling(h)  # Shape: (batch_size, seq_len, 1)
+        # Weighted average of hidden states
+        context_vector_1 = torch.sum(attention_weights * h, dim=1)  # Shape: (batch_size, 128)
         
         # Method 2: Multi-head attention pooling (original)
         q = self.pool_query.expand(B, -1, -1)
         ctx_2, _ = self.pool_attn(q, self.pool_ln(h), self.pool_ln(h))
-        context_vector_2 = ctx_2.squeeze(1)  # (B, 128)
+        context_vector_2 = ctx_2.squeeze(1)  # Shape: (batch_size, 128)
         
         # Learnable combination of both pooling methods
         alpha = torch.sigmoid(self.pooling_weight)
