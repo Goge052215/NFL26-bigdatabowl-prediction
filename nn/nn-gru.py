@@ -759,20 +759,72 @@ def train_model(X_train, y_train, X_val, y_val, input_dim, horizon, Config):
 
 # main pipeline
 def main():
-    # Load
-    print("\n[1/4] Loading data...")
-    train_input_files = [Config.DATA_DIR / f"train/input_2023_w{w:02d}.csv" for w in range(1, 19)]
-    train_output_files = [Config.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
-    train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
-    train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
+    # Create cache directory
+    cache_dir = Path("nn/data_npy")
+    cache_dir.mkdir(exist_ok=True)
+    
+    # Cache file paths
+    cache_file_sequences = cache_dir / "nn_gru_sequences.pkl"
+    cache_file_targets_dx = cache_dir / "nn_gru_targets_dx.pkl"
+    cache_file_targets_dy = cache_dir / "nn_gru_targets_dy.pkl"
+    cache_file_targets_frame_ids = cache_dir / "nn_gru_targets_frame_ids.pkl"
+    cache_file_sequence_ids = cache_dir / "nn_gru_sequence_ids.pkl"
+    
+    # Check if cached data exists
+    cache_exists = all([
+        cache_file_sequences.exists(),
+        cache_file_targets_dx.exists(),
+        cache_file_targets_dy.exists(),
+        cache_file_targets_frame_ids.exists(),
+        cache_file_sequence_ids.exists()
+    ])
+    
+    if cache_exists:
+        print("\n[CACHE] Loading cached training data...")
+        import pickle
+        with open(cache_file_sequences, 'rb') as f:
+            sequences = pickle.load(f)
+        with open(cache_file_targets_dx, 'rb') as f:
+            targets_dx = pickle.load(f)
+        with open(cache_file_targets_dy, 'rb') as f:
+            targets_dy = pickle.load(f)
+        with open(cache_file_targets_frame_ids, 'rb') as f:
+            targets_frame_ids = pickle.load(f)
+        with open(cache_file_sequence_ids, 'rb') as f:
+            sequence_ids = pickle.load(f)
+        print(f"Loaded cached data: {len(sequences)} sequences")
+    else:
+        # Load
+        print("\n[1/4] Loading data...")
+        train_input_files = [Config.DATA_DIR / f"train/input_2023_w{w:02d}.csv" for w in range(1, 19)]
+        train_output_files = [Config.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
+        train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
+        train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
+        
+        # Prepare with advanced features
+        print("\n[2/4] Preparing with ADVANCED features...")
+        sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = prepare_sequences_with_advanced_features(
+            train_input, train_output, is_training=True, window_size=Config.WINDOW_SIZE
+        )
+        
+        # Save to cache
+        print("\n[CACHE] Saving processed data to cache...")
+        import pickle
+        with open(cache_file_sequences, 'wb') as f:
+            pickle.dump(sequences, f)
+        with open(cache_file_targets_dx, 'wb') as f:
+            pickle.dump(targets_dx, f)
+        with open(cache_file_targets_dy, 'wb') as f:
+            pickle.dump(targets_dy, f)
+        with open(cache_file_targets_frame_ids, 'wb') as f:
+            pickle.dump(targets_frame_ids, f)
+        with open(cache_file_sequence_ids, 'wb') as f:
+            pickle.dump(sequence_ids, f)
+        print("Cached data saved successfully!")
+    
+    # Load test data (always fresh since it's smaller)
     test_input = pd.read_csv(Config.DATA_DIR / "test_input.csv")
     test_template = pd.read_csv(Config.DATA_DIR / "test.csv")
-    
-    # Prepare with advanced features
-    print("\n[2/4] Preparing with ADVANCED features...")
-    sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = prepare_sequences_with_advanced_features(
-        train_input, train_output, is_training=True, window_size=Config.WINDOW_SIZE
-    )
     
     sequences = np.array(sequences, dtype=object)
     targets_dx = np.array(targets_dx, dtype=object)

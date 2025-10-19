@@ -818,20 +818,64 @@ def main():
     config = TransformerConfig()
     set_seed(config.SEED)
     
-    # Load data
-    print("\n[1/4] Loading data...")
-    train_input_files = [config.DATA_DIR / f"train/input_2023_w{w:02d}.csv" for w in range(1, 19)]
-    train_output_files = [config.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
-    train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
-    train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
-    test_input = pd.read_csv(config.DATA_DIR / "test_input.csv")
-    test_template = pd.read_csv(config.DATA_DIR / "test.csv")
+    # Create cache directory
+    cache_dir = Path("nn/data_npy")
+    cache_dir.mkdir(exist_ok=True)
     
-    # Prepare sequences with Transformer-optimized features
-    print("\n[2/4] Preparing sequences with Transformer features...")
-    sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = prepare_sequences_with_transformer_features(
-        train_input, train_output, is_training=True, window_size=config.WINDOW_SIZE
-    )
+    # Define cache file paths
+    cache_sequences = cache_dir / "transformer_sequences.pkl"
+    cache_targets_dx = cache_dir / "transformer_targets_dx.pkl"
+    cache_targets_dy = cache_dir / "transformer_targets_dy.pkl"
+    cache_targets_frame_ids = cache_dir / "transformer_targets_frame_ids.pkl"
+    cache_sequence_ids = cache_dir / "transformer_sequence_ids.pkl"
+    
+    # Check if cached data exists
+    if (cache_sequences.exists() and cache_targets_dx.exists() and 
+        cache_targets_dy.exists() and cache_targets_frame_ids.exists() and 
+        cache_sequence_ids.exists()):
+        print("\n[1/4] Loading cached data...")
+        import pickle
+        with open(cache_sequences, 'rb') as f:
+            sequences = pickle.load(f)
+        with open(cache_targets_dx, 'rb') as f:
+            targets_dx = pickle.load(f)
+        with open(cache_targets_dy, 'rb') as f:
+            targets_dy = pickle.load(f)
+        with open(cache_targets_frame_ids, 'rb') as f:
+            targets_frame_ids = pickle.load(f)
+        with open(cache_sequence_ids, 'rb') as f:
+            sequence_ids = pickle.load(f)
+        print("Cached data loaded successfully!")
+    else:
+        # Load data
+        print("\n[1/4] Loading data...")
+        train_input_files = [config.DATA_DIR / f"train/input_2023_w{w:02d}.csv" for w in range(1, 19)]
+        train_output_files = [config.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
+        train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
+        train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
+        test_input = pd.read_csv(config.DATA_DIR / "test_input.csv")
+        test_template = pd.read_csv(config.DATA_DIR / "test.csv")
+        
+        # Prepare sequences with Transformer-optimized features
+        print("\n[2/4] Preparing sequences with Transformer features...")
+        sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = prepare_sequences_with_transformer_features(
+            train_input, train_output, is_training=True, window_size=config.WINDOW_SIZE
+        )
+        
+        # Save processed data to cache
+        print("Saving processed data to cache...")
+        import pickle
+        with open(cache_sequences, 'wb') as f:
+            pickle.dump(sequences, f)
+        with open(cache_targets_dx, 'wb') as f:
+            pickle.dump(targets_dx, f)
+        with open(cache_targets_dy, 'wb') as f:
+            pickle.dump(targets_dy, f)
+        with open(cache_targets_frame_ids, 'wb') as f:
+            pickle.dump(targets_frame_ids, f)
+        with open(cache_sequence_ids, 'wb') as f:
+            pickle.dump(sequence_ids, f)
+        print("Data cached successfully!")
     
     sequences = np.array(sequences, dtype=object)
     targets_dx = np.array(targets_dx, dtype=object)
