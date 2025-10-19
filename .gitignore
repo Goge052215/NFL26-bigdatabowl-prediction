@@ -3,12 +3,11 @@ working/
 nn/working/
 nn/outputs/
 outputs/
-
 catboost_info/
 __pycache__/
 *.pyc
 # TensorBoard & tfevents
 **/events.out.tfevents
 
-# Ignore cache directories and large data files
+# Ignore cache directories but allow pkl files (handled by LFS)
 *.npy
