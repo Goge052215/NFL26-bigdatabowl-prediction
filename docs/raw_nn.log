@@ -1048,6 +1048,230 @@ Training Y-axis model...
 
 Fold 5 - X loss: 0.04355, Y loss: 0.04047
 
+
+V6 performance log:
+
+============================================================
+Fold 1/5
+============================================================
+Training X-axis model...
+  Epoch 10: train=0.0669, val=0.0613
+  Epoch 20: train=0.0594, val=0.0492
+  Epoch 30: train=0.0534, val=0.0443
+  Epoch 40: train=0.0513, val=0.0431
+  Epoch 50: train=0.0508, val=0.0429
+  Epoch 60: train=0.0502, val=0.0425
+  Epoch 70: train=0.0499, val=0.0427
+  Epoch 80: train=0.0497, val=0.0426
+  Epoch 90: train=0.0493, val=0.0426
+  Epoch 100: train=0.0501, val=0.0426
+  Epoch 110: train=0.0492, val=0.0426
+  Epoch 120: train=0.0486, val=0.0426
+  Epoch 130: train=0.0491, val=0.0426
+  Epoch 140: train=0.0495, val=0.0426
+  Epoch 150: train=0.0488, val=0.0426
+  Epoch 160: train=0.0488, val=0.0426
+  Early stop at epoch 162
+Training Y-axis model...
+  Epoch 10: train=0.0629, val=0.0522
+  Epoch 20: train=0.0533, val=0.0417
+  Epoch 30: train=0.0506, val=0.0432
+  Epoch 40: train=0.0473, val=0.0399
+  Epoch 50: train=0.0464, val=0.0393
+  Epoch 60: train=0.0446, val=0.0391
+  Epoch 70: train=0.0450, val=0.0390
+  Epoch 80: train=0.0452, val=0.0390
+  Epoch 90: train=0.0442, val=0.0390
+  Epoch 100: train=0.0443, val=0.0390
+  Epoch 110: train=0.0446, val=0.0389
+  Epoch 120: train=0.0446, val=0.0389
+  Epoch 130: train=0.0443, val=0.0389
+  Epoch 140: train=0.0446, val=0.0389
+  Epoch 150: train=0.0444, val=0.0389
+  Epoch 160: train=0.0450, val=0.0389
+  Epoch 170: train=0.0446, val=0.0389
+  Early stop at epoch 172
+
+Fold 1 - X loss: 0.04249, Y loss: 0.03893
+
+============================================================
+Fold 2/5
+============================================================
+Training X-axis model...
+  Epoch 10: train=0.0654, val=0.0521
+  Epoch 20: train=0.0589, val=0.0509
+  Epoch 30: train=0.0531, val=0.0531
+  Epoch 40: train=0.0499, val=0.0469
+  Epoch 50: train=0.0488, val=0.0465
+  Epoch 60: train=0.0482, val=0.0463
+  Epoch 70: train=0.0483, val=0.0461
+  Epoch 80: train=0.0471, val=0.0463
+  Epoch 90: train=0.0477, val=0.0463
+  Epoch 100: train=0.0473, val=0.0463
+  Epoch 110: train=0.0483, val=0.0463
+  Epoch 120: train=0.0473, val=0.0463
+  Epoch 130: train=0.0476, val=0.0463
+  Epoch 140: train=0.0480, val=0.0463
+  Epoch 150: train=0.0478, val=0.0463
+  Epoch 160: train=0.0484, val=0.0463
+  Early stop at epoch 161
+Training Y-axis model...
+  Epoch 10: train=0.0600, val=0.0505
+  Epoch 20: train=0.0535, val=0.0474
+  Epoch 30: train=0.0498, val=0.0474
+  Epoch 40: train=0.0435, val=0.0435
+  Epoch 50: train=0.0417, val=0.0431
+  Epoch 60: train=0.0411, val=0.0432
+  Epoch 70: train=0.0403, val=0.0430
+  Epoch 80: train=0.0404, val=0.0431
+  Epoch 90: train=0.0403, val=0.0430
+  Epoch 100: train=0.0398, val=0.0430
+  Epoch 110: train=0.0395, val=0.0430
+  Epoch 120: train=0.0405, val=0.0430
+  Epoch 130: train=0.0398, val=0.0430
+  Epoch 140: train=0.0399, val=0.0430
+  Epoch 150: train=0.0398, val=0.0430
+  Epoch 160: train=0.0401, val=0.0430
+  Epoch 170: train=0.0404, val=0.0430
+  Early stop at epoch 172
+
+Fold 2 - X loss: 0.04609, Y loss: 0.04299
+
+============================================================
+Fold 3/5
+============================================================
+Training X-axis model...
+  Epoch 10: train=0.0656, val=0.0542
+  Epoch 20: train=0.0592, val=0.0559
+  Epoch 30: train=0.0540, val=0.0510
+  Epoch 40: train=0.0495, val=0.0489
+  Epoch 50: train=0.0460, val=0.0473
+  Epoch 60: train=0.0448, val=0.0476
+  Epoch 70: train=0.0429, val=0.0471
+  Epoch 80: train=0.0425, val=0.0471
+  Epoch 90: train=0.0419, val=0.0471
+  Epoch 100: train=0.0420, val=0.0471
+  Epoch 110: train=0.0421, val=0.0471
+  Epoch 120: train=0.0423, val=0.0471
+  Epoch 130: train=0.0419, val=0.0471
+  Epoch 140: train=0.0421, val=0.0471
+  Epoch 150: train=0.0419, val=0.0471
+  Epoch 160: train=0.0419, val=0.0471
+  Epoch 170: train=0.0424, val=0.0471
+  Early stop at epoch 171
+Training Y-axis model...
+  Epoch 10: train=0.0613, val=0.0518
+  Epoch 20: train=0.0530, val=0.0480
+  Epoch 30: train=0.0475, val=0.0441
+  Epoch 40: train=0.0458, val=0.0435
+  Epoch 50: train=0.0440, val=0.0430
+  Epoch 60: train=0.0434, val=0.0431
+  Epoch 70: train=0.0423, val=0.0429
+  Epoch 80: train=0.0423, val=0.0428
+  Epoch 90: train=0.0420, val=0.0427
+  Epoch 100: train=0.0418, val=0.0427
+  Epoch 110: train=0.0418, val=0.0427
+  Epoch 120: train=0.0422, val=0.0427
+  Epoch 130: train=0.0421, val=0.0427
+  Epoch 140: train=0.0418, val=0.0427
+  Epoch 150: train=0.0418, val=0.0427
+  Epoch 160: train=0.0421, val=0.0427
+  Epoch 170: train=0.0413, val=0.0427
+  Epoch 180: train=0.0419, val=0.0427
+  Epoch 190: train=0.0417, val=0.0427
+  Early stop at epoch 198
+
+Fold 3 - X loss: 0.04683, Y loss: 0.04265
+
+============================================================
+Fold 4/5
+============================================================
+Training X-axis model...
+  Epoch 10: train=0.0672, val=0.0537
+  Epoch 20: train=0.0604, val=0.0492
+  Epoch 30: train=0.0539, val=0.0454
+  Epoch 40: train=0.0518, val=0.0448
+  Epoch 50: train=0.0503, val=0.0434
+  Epoch 60: train=0.0476, val=0.0433
+  Epoch 70: train=0.0478, val=0.0431
+  Epoch 80: train=0.0459, val=0.0430
+  Epoch 90: train=0.0464, val=0.0430
+  Epoch 100: train=0.0461, val=0.0429
+  Epoch 110: train=0.0462, val=0.0430
+  Epoch 120: train=0.0460, val=0.0430
+  Epoch 130: train=0.0459, val=0.0429
+  Epoch 140: train=0.0462, val=0.0429
+  Epoch 150: train=0.0463, val=0.0429
+  Epoch 160: train=0.0462, val=0.0429
+  Epoch 170: train=0.0463, val=0.0429
+  Early stop at epoch 177
+Training Y-axis model...
+  Epoch 10: train=0.0618, val=0.0434
+  Epoch 20: train=0.0532, val=0.0424
+  Epoch 30: train=0.0499, val=0.0391
+  Epoch 40: train=0.0475, val=0.0386
+  Epoch 50: train=0.0470, val=0.0377
+  Epoch 60: train=0.0466, val=0.0378
+  Epoch 70: train=0.0463, val=0.0375
+  Epoch 80: train=0.0457, val=0.0375
+  Epoch 90: train=0.0458, val=0.0375
+  Epoch 100: train=0.0466, val=0.0376
+  Epoch 110: train=0.0460, val=0.0375
+  Epoch 120: train=0.0462, val=0.0375
+  Epoch 130: train=0.0458, val=0.0375
+  Epoch 140: train=0.0457, val=0.0375
+  Epoch 150: train=0.0453, val=0.0375
+  Epoch 160: train=0.0457, val=0.0375
+  Epoch 170: train=0.0454, val=0.0375
+  Epoch 180: train=0.0458, val=0.0375
+  Early stop at epoch 188
+
+Fold 4 - X loss: 0.04283, Y loss: 0.03747
+
+============================================================
+Fold 5/5
+============================================================
+Training X-axis model...
+  Epoch 10: train=0.0677, val=0.0576
+  Epoch 20: train=0.0603, val=0.0485
+  Epoch 30: train=0.0553, val=0.0486
+  Epoch 40: train=0.0506, val=0.0449
+  Epoch 50: train=0.0477, val=0.0441
+  Epoch 60: train=0.0461, val=0.0434
+  Epoch 70: train=0.0469, val=0.0437
+  Epoch 80: train=0.0449, val=0.0433
+  Epoch 90: train=0.0442, val=0.0432
+  Epoch 100: train=0.0443, val=0.0432
+  Epoch 110: train=0.0442, val=0.0432
+  Epoch 120: train=0.0443, val=0.0432
+  Epoch 130: train=0.0441, val=0.0432
+  Epoch 140: train=0.0442, val=0.0432
+  Epoch 150: train=0.0442, val=0.0432
+  Epoch 160: train=0.0446, val=0.0432
+  Early stop at epoch 165
+Training Y-axis model...
+  Epoch 10: train=0.0613, val=0.0489
+  Epoch 20: train=0.0540, val=0.0501
+  Epoch 30: train=0.0485, val=0.0420
+  Epoch 40: train=0.0444, val=0.0413
+  Epoch 50: train=0.0433, val=0.0411
+  Epoch 60: train=0.0416, val=0.0409
+  Epoch 70: train=0.0414, val=0.0410
+  Epoch 80: train=0.0413, val=0.0408
+  Epoch 90: train=0.0414, val=0.0408
+  Epoch 100: train=0.0416, val=0.0408
+  Epoch 110: train=0.0415, val=0.0408
+  Epoch 120: train=0.0413, val=0.0408
+  Epoch 130: train=0.0414, val=0.0408
+  Epoch 140: train=0.0414, val=0.0408
+  Epoch 150: train=0.0415, val=0.0408
+  Epoch 160: train=0.0414, val=0.0408
+  Epoch 170: train=0.0413, val=0.0408
+  Early stop at epoch 178
+
+Fold 5 - X loss: 0.04315, Y loss: 0.04077
+
+
 V1 Benchmark performance log:
 
 ============================================================
@@ -1220,3 +1444,8 @@ V5 performance (LR=4e-4,Epoch=1000,HidDim=256,Conv1D)
 X loss: [0.04262, 0.04613, 0.04678, 0.04323, 0.04355]
 Y loss: [0.03901, 0.04289, 0.04287, 0.03777, 0.04047]
 Avg X,Y loss: [0.04446, 0.04060]
+
+V6 performance (+21 features)
+X loss: [0.04249, 0.04609, 0.04683, 0.04283, 0.04315]
+Y loss: [0.03893, 0.04299, 0.04265, 0.03747, 0.04077]
+Avg X,Y loss: [0.04428, 0.04056]

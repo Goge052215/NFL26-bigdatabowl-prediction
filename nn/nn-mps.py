@@ -1,5 +1,3 @@
-# V5 - RMSE: 0.598
-
 import torch
 import torch.nn as nn
 import numpy as np
@@ -43,9 +41,7 @@ class Config:
     RADIUS = 15.0
     TAU = 6.0
     
-    DEVICE = torch.device(
-        "mps" if torch.backends.mps.is_available() else "cpu"
-    )
+    DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
 def set_seed(seed=Config.SEED):
     import random
@@ -212,7 +208,7 @@ def add_advanced_features(df):
             if col in df.columns:
                 df[f'{col}_lag{lag}'] = df.groupby(gcols)[col].shift(lag).fillna(0)
     
-    # GROUP 5: Velocity Change Features (7)
+    # GROUP 5: Velocity Change Features (4)
     if 'velocity_x' in df.columns:
         df['velocity_x_change'] = df.groupby(gcols)['velocity_x'].diff().fillna(0)
         df['velocity_y_change'] = df.groupby(gcols)['velocity_y'].diff().fillna(0)
@@ -221,10 +217,6 @@ def add_advanced_features(df):
         df['direction_change'] = df['direction_change'].apply(
             lambda x: x if abs(x) < 180 else x - 360 * np.sign(x)
         )
-        # Acceleration features
-        df['accel_magnitude'] = np.sqrt(df['acceleration_x']**2 + df['acceleration_y']**2)
-        df['jerk_x'] = df.groupby(gcols)['acceleration_x'].diff().fillna(0)
-        df['jerk_y'] = df.groupby(gcols)['acceleration_y'].diff().fillna(0)
     
     # GROUP 6: Field Position Features (4)
     df['dist_from_left'] = df['y']
@@ -245,34 +237,6 @@ def add_advanced_features(df):
         lambda x: x / (x.max() + 1)
     )
     
-    # GROUP 9: Physics features (5) - V6 additions
-    dir_rad = np.deg2rad(df['dir'].fillna(0))
-    delta_t = 0.1
-    
-    # Convert kinematics to SI units
-    vx_mps = df['velocity_x'].fillna(0) * 0.44704
-    vy_mps = df['velocity_y'].fillna(0) * 0.44704
-    ax_mps2 = df['acceleration_x'].fillna(0) * 0.44704
-    ay_mps2 = df['acceleration_y'].fillna(0) * 0.44704
-    speed_mps = df['s'].fillna(0) * 0.44704
-    
-    # Tangential (along heading) and lateral (normal) acceleration
-    df['tangential_accel'] = ax_mps2 * np.sin(dir_rad) + ay_mps2 * np.cos(dir_rad)
-    df['lateral_accel'] = ax_mps2 * np.cos(dir_rad) - ay_mps2 * np.sin(dir_rad)
-    
-    # Curvature (1/m) derived from lateral acceleration
-    df['curvature'] = df['lateral_accel'] / (speed_mps**2 + 1e-6)
-    
-    # Yaw rate (rad/s) from frame-to-frame heading change
-    if 'direction_change' in df.columns:
-        df['yaw_rate'] = np.deg2rad(df['direction_change'].fillna(0)) / delta_t
-    else:
-        df['yaw_rate'] = 0.0
-    
-    # Mechanical power (W): m * a · v
-    mass_kg = df['player_weight'].fillna(200.0) / 2.20462
-    df['mechanical_power'] = mass_kg * (ax_mps2 * vx_mps + ay_mps2 * vy_mps)
-
     print(f"Total features after enhancement: {len(df.columns)}")
     
     return df
@@ -345,11 +309,161 @@ def prepare_sequences_with_advanced_features(input_df, output_df=None, test_temp
     )
     
     # ADVANCED FEATURES
-    print("Step 2/3: Adding advanced features...")
+    print("Step 2/4: Adding advanced features...")
     input_df = add_advanced_features(input_df)
     
+    # PLAYER INTERACTION FEATURES
+    print("Step 3/4: Adding player interaction features...")
+    use_players_interactions = True  # Enable player interaction features
+    if use_players_interactions:
+        agg_rows = []
+        # Group once (avoid overhead of apply per small group)
+        for (g, p, f), grp in input_df.groupby(['game_id', 'play_id', 'frame_id'], sort=False):
+            n = len(grp)
+            nfl_ids = grp['nfl_id'].to_numpy()
+            # Only compute/emit for player_to_predict==True (if column exists)
+            compute_mask = grp['player_to_predict'].to_numpy().astype(bool) if 'player_to_predict' in grp.columns else np.ones(n, dtype=bool)
+            if n < 2:
+                # Create empty stats rows (NaNs) only for players to predict
+                for nid in nfl_ids[compute_mask]:
+                    agg_rows.append({
+                        'game_id': g, 'play_id': p, 'frame_id': f, 'nfl_id': nid,
+                        'distance_to_player_mean_offense': np.nan,
+                        'distance_to_player_min_offense': np.nan,
+                        'distance_to_player_max_offense': np.nan,
+                        'relative_velocity_magnitude_mean_offense': np.nan,
+                        'relative_velocity_magnitude_min_offense': np.nan,
+                        'relative_velocity_magnitude_max_offense': np.nan,
+                        'angle_to_player_mean_offense': np.nan,
+                        'angle_to_player_min_offense': np.nan,
+                        'angle_to_player_max_offense': np.nan,
+                        'distance_to_player_mean_defense': np.nan,
+                        'distance_to_player_min_defense': np.nan,
+                        'distance_to_player_max_defense': np.nan,
+                        'relative_velocity_magnitude_mean_defense': np.nan,
+                        'relative_velocity_magnitude_min_defense': np.nan,
+                        'relative_velocity_magnitude_max_defense': np.nan,
+                        'angle_to_player_mean_defense': np.nan,
+                        'angle_to_player_min_defense': np.nan,
+                        'angle_to_player_max_defense': np.nan,
+                        'nearest_opponent_dist': np.nan,
+                        'nearest_opponent_angle': np.nan,
+                        'nearest_opponent_rel_speed': np.nan,
+                    })
+                continue
+
+            x = grp['x'].to_numpy(dtype=np.float32)
+            y = grp['y'].to_numpy(dtype=np.float32)
+            vx = grp['velocity_x'].to_numpy(dtype=np.float32)
+            vy = grp['velocity_y'].to_numpy(dtype=np.float32)
+            is_offense = grp['is_offense'].to_numpy()
+            is_defense = grp['is_defense'].to_numpy()
+
+            # Pairwise deltas (broadcast)
+            dx = x[None, :] - x[:, None]        # (n,n) x_j - x_i reversed later for angle
+            dy = y[None, :] - y[:, None]
+            # Angle from i -> j (want y_j - y_i, x_j - x_i)
+            angle_mat = np.arctan2(-dy, -dx)    # because dx currently x[None]-x[:,None] => -(x_j - x_i)
+
+            # Distances
+            dist = np.sqrt(dx ** 2 + dy ** 2)
+            # Relative velocity magnitudes
+            dvx = vx[:, None] - vx[None, :]
+            dvy = vy[:, None] - vy[None, :]
+            rel_speed = np.sqrt(dvx ** 2 + dvy ** 2)
+
+            # Offense mask (exclude self)
+            offense_mask = (is_offense[:, None] == is_offense[None, :])
+            np.fill_diagonal(offense_mask, False)
+
+            # Defense mask (exclude self)
+            defense_mask = (is_defense[:, None] == is_defense[None, :])
+            np.fill_diagonal(defense_mask, False)
+
+            # Opponent mask (exclude self)
+            opp_mask = (is_offense[:, None] != is_offense[None, :])
+            np.fill_diagonal(opp_mask, False)
+
+            # Mask out self distances
+            dist_diag_nan = dist.copy()
+            np.fill_diagonal(dist_diag_nan, np.nan)
+            rel_diag_nan = rel_speed.copy()
+            np.fill_diagonal(rel_diag_nan, np.nan)
+            angle_diag_nan = angle_mat.copy()
+            np.fill_diagonal(angle_diag_nan, np.nan)
+
+            def masked_stats(mat, mask):
+                # mat, mask shape (n,n)
+                masked = np.where(mask, mat, np.nan)
+                cnt = mask.sum(axis=1)
+                mean = np.nanmean(masked, axis=1)
+                amin = np.nanmin(masked, axis=1)
+                amax = np.nanmax(masked, axis=1)
+                # Rows with zero valid -> set nan
+                zero = cnt == 0
+                mean[zero] = np.nan; amin[zero] = np.nan; amax[zero] = np.nan
+                return mean, amin, amax
+
+            d_mean_o, d_min_o, d_max_o = masked_stats(dist_diag_nan, offense_mask)
+            v_mean_o, v_min_o, v_max_o = masked_stats(rel_diag_nan, offense_mask)
+            a_mean_o, a_min_o, a_max_o = masked_stats(angle_diag_nan, offense_mask)
+
+            d_mean_d, d_min_d, d_max_d = masked_stats(dist_diag_nan, defense_mask)
+            v_mean_d, v_min_d, v_max_d = masked_stats(rel_diag_nan, defense_mask)
+            a_mean_d, a_min_d, a_max_d = masked_stats(angle_diag_nan, defense_mask)
+
+            # NEW: nearest opponent stats
+            masked_dist_opp = np.where(opp_mask, dist_diag_nan, np.nan)         # (n,n)
+            nearest_dist = np.nanmin(masked_dist_opp, axis=1)                   # (n,)
+            nearest_idx = np.nanargmin(masked_dist_opp, axis=1)                 # (n,)
+            # Guard where all-NaN rows (no opponents)
+            all_nan = ~np.isfinite(nearest_dist)
+            nearest_idx_safe = nearest_idx.copy()
+            nearest_idx_safe[all_nan] = 0
+            nearest_angle = np.take_along_axis(angle_diag_nan, nearest_idx_safe[:, None], axis=1).squeeze(1)
+            nearest_rel = np.take_along_axis(rel_diag_nan, nearest_idx_safe[:, None], axis=1).squeeze(1)
+            nearest_angle[all_nan] = np.nan
+            nearest_rel[all_nan] = np.nan
+
+            for idx, nid in enumerate(nfl_ids):
+                if not compute_mask[idx]:
+                    continue  # only for player_to_predict==True
+                agg_rows.append({
+                    'game_id': g, 'play_id': p, 'frame_id': f, 'nfl_id': nid,
+                    'distance_to_player_mean_offense': d_mean_o[idx],
+                    'distance_to_player_min_offense': d_min_o[idx],
+                    'distance_to_player_max_offense': d_max_o[idx],
+                    'relative_velocity_magnitude_mean_offense': v_mean_o[idx],  # Fixed typo: was v_mean_o[ix]
+                    'relative_velocity_magnitude_min_offense': v_min_o[idx],
+                    'relative_velocity_magnitude_max_offense': v_max_o[idx],
+                    'angle_to_player_mean_offense': a_mean_o[idx],
+                    'angle_to_player_min_offense': a_min_o[idx],
+                    'angle_to_player_max_offense': a_max_o[idx],
+                    'distance_to_player_mean_defense': d_mean_d[idx],
+                    'distance_to_player_min_defense': d_min_d[idx],
+                    'distance_to_player_max_defense': d_max_d[idx],
+                    'relative_velocity_magnitude_mean_defense': v_mean_d[idx],
+                    'relative_velocity_magnitude_min_defense': v_min_d[idx],
+                    'relative_velocity_magnitude_max_defense': v_max_d[idx],
+                    'angle_to_player_mean_defense': a_mean_d[idx],
+                    'angle_to_player_min_defense': a_min_d[idx],
+                    'angle_to_player_max_defense': a_max_d[idx],
+                    'nearest_opponent_dist': nearest_dist[idx],
+                    'nearest_opponent_angle': nearest_angle[idx],
+                    'nearest_opponent_rel_speed': nearest_rel[idx],
+                })
+
+        interaction_agg = pd.DataFrame(agg_rows)
+        input_df = input_df.merge(
+            interaction_agg,
+            on=['game_id', 'play_id', 'frame_id', 'nfl_id'],
+            how='left'
+        )
+    else:
+        print("Skipping player interaction feature computation (use_players_interactions=False).")
+    
     # GNN LITE FEATURES
-    print("Step 2.5/3: Adding GNN Lite features...")
+    print("Step 4/4: Adding GNN Lite features...")
     gnn_processor = GNNLiteProcessor()
     gnn_features = gnn_processor.compute_neighbor_embeddings(input_df)
     
@@ -414,9 +528,8 @@ def prepare_sequences_with_advanced_features(input_df, output_df=None, test_temp
         'x_lag4', 'y_lag4', 'velocity_x_lag4', 'velocity_y_lag4',
         'x_lag5', 'y_lag5', 'velocity_x_lag5', 'velocity_y_lag5',
         
-        # NEW: Velocity changes (7)
-        'velocity_x_change', 'velocity_y_change', 'speed_change', 'direction_change', 
-        'accel_magnitude', 'jerk_x', 'jerk_y'
+        # NEW: Velocity changes (4)
+        'velocity_x_change', 'velocity_y_change', 'speed_change', 'direction_change',
         
         # NEW: Field position (4)
         'dist_from_sideline', 'dist_from_endzone',
@@ -427,9 +540,6 @@ def prepare_sequences_with_advanced_features(input_df, output_df=None, test_temp
         # NEW: Time (2)
         'frames_elapsed', 'normalized_time',
         
-        # NEW: Physics (5) - V6
-        'tangential_accel', 'lateral_accel', 'curvature', 'yaw_rate', 'mechanical_power',
-        
         # GNN LITE FEATURES (20)
         'gnn_ally_cnt', 'gnn_opp_cnt',
         'gnn_ally_dx_mean', 'gnn_ally_dy_mean', 'gnn_ally_dvx_mean', 'gnn_ally_dvy_mean',
@@ -438,6 +548,15 @@ def prepare_sequences_with_advanced_features(input_df, output_df=None, test_temp
         'gnn_opp_dist_1', 'gnn_opp_dist_2', 'gnn_opp_dist_3',
         'gnn_nearest_ally_dist', 'gnn_nearest_opp_dist',
         'gnn_ally_attention_sum', 'gnn_opp_attention_sum',
+        
+        # PLAYER INTERACTION FEATURES (21)
+        'd_mean_o', 'd_min_o', 'd_max_o',  # offensive distance stats
+        'd_mean_d', 'd_min_d', 'd_max_d',  # defensive distance stats
+        'v_mean_o', 'v_min_o', 'v_max_o',  # offensive velocity stats
+        'v_mean_d', 'v_min_d', 'v_max_d',  # defensive velocity stats
+        'a_mean_o', 'a_min_o', 'a_max_o',  # offensive angle stats
+        'a_mean_d', 'a_min_d', 'a_max_d',  # defensive angle stats
+        'nearest_opp_dist', 'nearest_opp_angle', 'nearest_opp_rel_speed',  # nearest opponent stats
     ]
     
     # Filter to existing
@@ -570,10 +689,9 @@ class TemporalHuber(nn.Module):
 class SeqModel(nn.Module):
     def __init__(self, input_dim, horizon):
         super().__init__()
-        self.input_ln = nn.LayerNorm(input_dim)
         self.cnn = nn.Conv1d(
             in_channels=input_dim, 
-            out_channels=128, 
+            out_channels=64, 
             kernel_size=3, 
             padding=1
         )
@@ -581,7 +699,7 @@ class SeqModel(nn.Module):
             input_dim, 128, 
             num_layers=2, 
             batch_first=True, 
-            dropout=0.
+            dropout=0.15
         )
         self.gpu_proj = nn.Linear(256, 128)
         
@@ -616,11 +734,11 @@ class SeqModel(nn.Module):
         self.pooling_weight = nn.Parameter(torch.tensor(0.5))
     
     def forward(self, x):
-        # Transformer encoding
+        # GRU encoding
         h, _ = self.gru(x)  # Shape: (batch_size, seq_len, 128)
         B = h.shape[0]
         
-        # Method 1: Attention pooling
+        # Method 1: Attention pooling (CommonLit style)
         # Compute attention weights for each timestep
         attention_weights = self.attention_pooling(h)  # Shape: (batch_size, seq_len, 1)
         # Weighted average of hidden states
@@ -754,72 +872,20 @@ def train_model(X_train, y_train, X_val, y_val, input_dim, horizon, Config):
 
 # main pipeline
 def main():
-    # Create cache directory
-    cache_dir = Path("nn/data_npy")
-    cache_dir.mkdir(exist_ok=True)
-    
-    # Cache file paths
-    cache_file_sequences = cache_dir / "nn_mps_sequences.pkl"
-    cache_file_targets_dx = cache_dir / "nn_mps_targets_dx.pkl"
-    cache_file_targets_dy = cache_dir / "nn_mps_targets_dy.pkl"
-    cache_file_targets_frame_ids = cache_dir / "nn_mps_targets_frame_ids.pkl"
-    cache_file_sequence_ids = cache_dir / "nn_mps_sequence_ids.pkl"
-    
-    # Check if cached data exists
-    cache_exists = all([
-        cache_file_sequences.exists(),
-        cache_file_targets_dx.exists(),
-        cache_file_targets_dy.exists(),
-        cache_file_targets_frame_ids.exists(),
-        cache_file_sequence_ids.exists()
-    ])
-    
-    if cache_exists:
-        print("\n[CACHE] Loading cached training data...")
-        import pickle
-        with open(cache_file_sequences, 'rb') as f:
-            sequences = pickle.load(f)
-        with open(cache_file_targets_dx, 'rb') as f:
-            targets_dx = pickle.load(f)
-        with open(cache_file_targets_dy, 'rb') as f:
-            targets_dy = pickle.load(f)
-        with open(cache_file_targets_frame_ids, 'rb') as f:
-            targets_frame_ids = pickle.load(f)
-        with open(cache_file_sequence_ids, 'rb') as f:
-            sequence_ids = pickle.load(f)
-        print(f"Loaded cached data: {len(sequences)} sequences")
-    else:
-        # Load
-        print("\n[1/4] Loading data...")
-        train_input_files = [Config.DATA_DIR / f"train/input_2023_w{w:02d}.csv" for w in range(1, 19)]
-        train_output_files = [Config.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
-        train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
-        train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
-        
-        # Prepare with advanced features
-        print("\n[2/4] Preparing with ADVANCED features...")
-        sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = prepare_sequences_with_advanced_features(
-            train_input, train_output, is_training=True, window_size=Config.WINDOW_SIZE
-        )
-        
-        # Save to cache using pickle for variable-length sequences
-        print("\n[CACHE] Saving processed data to cache...")
-        import pickle
-        with open(cache_file_sequences, 'wb') as f:
-            pickle.dump(sequences, f)
-        with open(cache_file_targets_dx, 'wb') as f:
-            pickle.dump(targets_dx, f)
-        with open(cache_file_targets_dy, 'wb') as f:
-            pickle.dump(targets_dy, f)
-        with open(cache_file_targets_frame_ids, 'wb') as f:
-            pickle.dump(targets_frame_ids, f)
-        with open(cache_file_sequence_ids, 'wb') as f:
-            pickle.dump(sequence_ids, f)
-        print("Cached data saved successfully!")
-    
-    # Load test data (always fresh since it's smaller)
+    # Load
+    print("\n[1/4] Loading data...")
+    train_input_files = [Config.DATA_DIR / f"train/input_2023_w{w:02d}.csv" for w in range(1, 19)]
+    train_output_files = [Config.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
+    train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
+    train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
     test_input = pd.read_csv(Config.DATA_DIR / "test_input.csv")
     test_template = pd.read_csv(Config.DATA_DIR / "test.csv")
+    
+    # Prepare with advanced features
+    print("\n[2/4] Preparing with ADVANCED features...")
+    sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = prepare_sequences_with_advanced_features(
+        train_input, train_output, is_training=True, window_size=Config.WINDOW_SIZE
+    )
     
     sequences = np.array(sequences, dtype=object)
     targets_dx = np.array(targets_dx, dtype=object)

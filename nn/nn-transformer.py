@@ -4,49 +4,57 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm.auto import tqdm
+from datetime import datetime
 import warnings
 import os
-import math
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GroupKFold
-from torch.utils.data import DataLoader
+from torch.utils.data import TensorDataset, DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 warnings.filterwarnings('ignore')
 
-# Enhanced Config for Transformer
-class TransformerConfig:
-    DATA_DIR = Path("data")
+# Configs
+class Config:
+    DATA_DIR = Path("/kaggle/input/nfl-big-data-bowl-2026-prediction")
+    # DATA_DIR = Path("data")
     OUTPUT_DIR = Path("working")
     OUTPUT_DIR.mkdir(exist_ok=True)
     
     SEED = 42
     N_FOLDS = 5
 
-    BATCH_SIZE = 128  # Reduced for Transformer memory requirements
-    EPOCHS = 1000
-    PATIENCE = 150
-    LEARNING_RATE = 1e-4
+    BATCH_SIZE = 256
+    EPOCHS = 200
+    PATIENCE = 20
+    LEARNING_RATE = 8e-4
     
-    WINDOW_SIZE = 12  # Increased for better temporal context
+    WINDOW_SIZE = 8
     HIDDEN_DIM = 256
     MAX_FUTURE_HORIZON = 120
     
-    # Transformer specific
-    N_HEADS = 8
-    N_LAYERS = 6
-    DROPOUT = 0.1
-    FF_DIM = 512
+    FIELD_X_MIN, FIELD_X_MAX = 0.0, 120.0
+    FIELD_Y_MIN, FIELD_Y_MAX = 0.0, 53.3
+
+    # Spatio-Temporal Transformer hyperparams (smaller for faster training)
+    ST_D_MODEL = 96
+    ST_N_HEADS = 4
+    ST_SPATIAL_LAYERS = 1
+    ST_TEMPORAL_LAYERS = 1
+    ST_DROPOUT = 0.10
     
     # GNN-lite parameters
     K_NEIGH = 5
     RADIUS = 15.0
     TAU = 6.0
     
-    DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    DEVICE = torch.device(
+        "cuda" if torch.cuda.is_available() 
+        else ("mps" if torch.backends.mps.is_available() else "cpu")
+    )
 
-def set_seed(seed=TransformerConfig.SEED):
+def set_seed(seed=Config.SEED):
     import random
     random.seed(seed)
     np.random.seed(seed)
@@ -54,343 +62,9 @@ def set_seed(seed=TransformerConfig.SEED):
     torch.cuda.manual_seed_all(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
 
-set_seed(TransformerConfig.SEED)
+set_seed(Config.SEED)
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super().__init__()
-        
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * 
-                           (-math.log(10000.0) / d_model))
-        
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        
-        self.register_buffer('pe', pe)
-    
-    def forward(self, x):
-        return x + self.pe[:x.size(0), :]
-
-class SpatioTemporalTransformer(nn.Module):
-    def __init__(self, input_dim, horizon, config=TransformerConfig):
-        super().__init__()
-        self.config = config
-        self.input_dim = input_dim
-        self.horizon = horizon
-        
-        # Input projection
-        self.input_projection = nn.Linear(input_dim, config.HIDDEN_DIM)
-        
-        # Positional encoding
-        self.pos_encoding = PositionalEncoding(
-            config.HIDDEN_DIM, 
-            max_len=config.WINDOW_SIZE
-        )
-        
-        # Transformer encoder layers
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=config.HIDDEN_DIM,
-            nhead=config.N_HEADS,
-            dim_feedforward=config.FF_DIM,
-            dropout=config.DROPOUT,
-            activation='gelu',
-            batch_first=True,
-            norm_first=True  # Pre-norm for better training stability
-        )
-        
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer, 
-            num_layers=config.N_LAYERS
-        )
-        
-        # Enhanced spatial attention for better player interaction modeling
-        self.spatial_attention = nn.MultiheadAttention(
-            config.HIDDEN_DIM, 
-            num_heads=8,  # Increased for better spatial modeling
-            batch_first=True,
-            dropout=config.DROPOUT
-        )
-        
-        # Cross-attention for player interactions (when available)
-        self.player_interaction_attention = nn.MultiheadAttention(
-            config.HIDDEN_DIM,
-            num_heads=4,
-            batch_first=True,
-            dropout=config.DROPOUT
-        )
-        
-        # Multiple temporal queries for diverse temporal patterns
-        self.num_temporal_queries = 4
-        self.temporal_queries = nn.Parameter(torch.randn(self.num_temporal_queries, 1, config.HIDDEN_DIM))
-        self.temporal_attention = nn.MultiheadAttention(
-            config.HIDDEN_DIM,
-            num_heads=config.N_HEADS,
-            batch_first=True,
-            dropout=config.DROPOUT
-        )
-        
-        # Adaptive pooling for temporal queries
-        self.query_pooling = nn.AdaptiveAvgPool1d(1)
-        
-        # Layer normalization
-        self.layer_norm1 = nn.LayerNorm(config.HIDDEN_DIM)
-        self.layer_norm2 = nn.LayerNorm(config.HIDDEN_DIM)
-        self.layer_norm3 = nn.LayerNorm(config.HIDDEN_DIM)
-        
-        # Enhanced prediction head with residual connections
-        self.prediction_head = nn.Sequential(
-            nn.Linear(config.HIDDEN_DIM, config.HIDDEN_DIM),
-            nn.GELU(),
-            nn.Dropout(config.DROPOUT),
-            nn.Linear(config.HIDDEN_DIM, config.HIDDEN_DIM // 2),
-            nn.GELU(),
-            nn.Dropout(config.DROPOUT // 2),
-            nn.Linear(config.HIDDEN_DIM // 2, horizon)
-        )
-        
-        # Physics-informed velocity prediction
-        self.velocity_head = nn.Sequential(
-            nn.Linear(config.HIDDEN_DIM, config.HIDDEN_DIM // 2),
-            nn.GELU(),
-            nn.Dropout(config.DROPOUT // 2),
-            nn.Linear(config.HIDDEN_DIM // 2, horizon)
-        )
-        
-        # Learnable combination weights with better initialization
-        self.position_weight = nn.Parameter(torch.tensor(0.6))
-        self.velocity_weight = nn.Parameter(torch.tensor(0.4))
-        
-        # Initialize weights
-        self._init_weights()
-    
-    def _init_weights(self):
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.LayerNorm):
-                nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-    
-    def forward(self, x):
-        batch_size, seq_len, _ = x.shape
-        
-        # Input projection
-        x = self.input_projection(x)  # (batch_size, seq_len, hidden_dim)
-        
-        # Add positional encoding
-        x = x.transpose(0, 1)  # (seq_len, batch_size, hidden_dim)
-        x = self.pos_encoding(x)
-        x = x.transpose(0, 1)  # (batch_size, seq_len, hidden_dim)
-        
-        # Transformer encoding with residual connection
-        encoded = self.transformer_encoder(x)  # (batch_size, seq_len, hidden_dim)
-        
-        # Spatial attention (self-attention over sequence)
-        spatial_out, _ = self.spatial_attention(encoded, encoded, encoded)
-        spatial_out = self.layer_norm1(spatial_out + encoded)
-        
-        # Multiple temporal queries for diverse temporal patterns
-        temporal_outputs = []
-        for i in range(self.num_temporal_queries):
-            query = self.temporal_queries[i].expand(batch_size, -1, -1)
-            temporal_out, _ = self.temporal_attention(query, spatial_out, spatial_out)
-            temporal_outputs.append(temporal_out)
-        
-        # Combine multiple temporal queries using adaptive pooling
-        combined_temporal = torch.cat(temporal_outputs, dim=1)  # (batch_size, num_queries, hidden_dim)
-        
-        # Pool temporal queries to single representation
-        pooled_temporal = self.query_pooling(combined_temporal.transpose(1, 2)).transpose(1, 2)
-        pooled_temporal = pooled_temporal.squeeze(1)  # (batch_size, hidden_dim)
-        
-        # Apply final layer normalization
-        pooled_temporal = self.layer_norm3(pooled_temporal)
-        
-        # Generate predictions
-        position_pred = self.prediction_head(pooled_temporal)  # (batch_size, horizon)
-        velocity_pred = self.velocity_head(pooled_temporal)    # (batch_size, horizon)
-        
-        # Physics-informed combination with proper weight normalization
-        alpha = torch.sigmoid(self.position_weight)
-        beta = torch.sigmoid(self.velocity_weight)
-        
-        # Ensure weights sum to 1
-        total_weight = alpha + beta
-        alpha = alpha / total_weight
-        beta = beta / total_weight
-        
-        # Combine position and velocity predictions
-        combined_pred = alpha * position_pred + beta * torch.cumsum(velocity_pred, dim=1)
-        
-        return combined_pred
-
-class TemporalHuberLoss(nn.Module):
-    def __init__(self, delta=0.5, time_decay=0.02, velocity_weight=0.1):
-        super().__init__()
-        self.delta = delta
-        self.time_decay = time_decay
-        self.velocity_weight = velocity_weight
-    
-    def forward(self, pred, target, mask):
-        # Standard Huber loss
-        err = pred - target
-        abs_err = torch.abs(err)
-        huber = torch.where(abs_err <= self.delta, 
-                           0.5 * err * err, 
-                           self.delta * (abs_err - 0.5 * self.delta))
-        
-        # Temporal weighting (emphasize near-future predictions)
-        if self.time_decay > 0:
-            L = pred.size(1)
-            t = torch.arange(L, device=pred.device).float()
-            weight = torch.exp(-self.time_decay * t).view(1, L)
-            huber = huber * weight
-            mask = mask * weight
-        
-        # Velocity consistency loss (physics constraint)
-        if self.velocity_weight > 0 and pred.size(1) > 1:
-            velocity_pred = torch.diff(pred, dim=1)
-            velocity_target = torch.diff(target, dim=1)
-            velocity_loss = torch.abs(velocity_pred - velocity_target)
-            
-            # Add velocity loss to the main loss
-            velocity_mask = mask[:, 1:]  # Adjust mask for diff operation
-            velocity_component = (velocity_loss * velocity_mask).sum() / (velocity_mask.sum() + 1e-8)
-            huber_component = (huber * mask).sum() / (mask.sum() + 1e-8)
-            
-            return huber_component + self.velocity_weight * velocity_component
-        
-        return (huber * mask).sum() / (mask.sum() + 1e-8)
-
-# Dataset class remains the same as in nn-mps.py
-class NFLDataset(torch.utils.data.Dataset):
-    def __init__(self, sequences, targets, horizon):
-        self.sequences = sequences
-        self.targets = targets
-        self.horizon = horizon
-        
-    def __len__(self):
-        return len(self.sequences)
-    
-    def __getitem__(self, idx):
-        sequence = torch.tensor(self.sequences[idx].astype(np.float32))
-        target = self.targets[idx]
-        
-        # Prepare target with padding and mask
-        L = len(target)
-        padded_target = np.pad(target, (0, self.horizon - L), constant_values=0).astype(np.float32)
-        mask = np.zeros(self.horizon, dtype=np.float32)
-        mask[:L] = 1.0
-        
-        return sequence, torch.tensor(padded_target), torch.tensor(mask)
-
-def collate_fn(batch):
-    sequences, targets, masks = zip(*batch)
-    sequences = torch.stack(sequences)
-    targets = torch.stack(targets)
-    masks = torch.stack(masks)
-    return sequences, targets, masks
-
-def train_transformer_model(X_train, y_train, X_val, y_val, input_dim, horizon, config):
-    device = config.DEVICE
-    model = SpatioTemporalTransformer(input_dim, horizon, config).to(device)
-    
-    criterion = TemporalHuberLoss(delta=0.5, time_decay=0.02, velocity_weight=0.1)
-    optimizer = torch.optim.AdamW(
-        model.parameters(), 
-        lr=config.LEARNING_RATE, 
-        weight_decay=1e-4,
-        betas=(0.9, 0.999)
-    )
-    
-    # Cosine annealing scheduler with warm restarts
-    scheduler = CosineAnnealingLR(optimizer, T_max=config.EPOCHS//4, eta_min=1e-6)
-    
-    # Create datasets and dataloaders
-    train_dataset = NFLDataset(X_train, y_train, horizon)
-    val_dataset = NFLDataset(X_val, y_val, horizon)
-    
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=config.BATCH_SIZE, 
-        shuffle=True, 
-        collate_fn=collate_fn,
-        num_workers=0,
-        pin_memory=False
-    )
-    
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=config.BATCH_SIZE, 
-        shuffle=False, 
-        collate_fn=collate_fn,
-        num_workers=0,
-        pin_memory=False
-    )
-    
-    best_loss, best_state, bad = float('inf'), None, 0
-    
-    print(f"Training Transformer with {sum(p.numel() for p in model.parameters())} parameters")
-    
-    for epoch in range(1, config.EPOCHS + 1):
-        model.train()
-        train_losses = []
-        
-        for batch_idx, (sequences, targets, masks) in enumerate(train_loader):
-            sequences = sequences.to(device)
-            targets = targets.to(device)
-            masks = masks.to(device)
-            
-            pred = model(sequences)
-            loss = criterion(pred, targets, masks)
-            
-            optimizer.zero_grad()
-            loss.backward()
-            
-            # Gradient clipping for stability
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            
-            optimizer.step()
-            train_losses.append(loss.item())
-        
-        model.eval()
-        val_losses = []
-        with torch.no_grad():
-            for sequences, targets, masks in val_loader:
-                sequences = sequences.to(device)
-                targets = targets.to(device)
-                masks = masks.to(device)
-                
-                pred = model(sequences)
-                val_losses.append(criterion(pred, targets, masks).item())
-        
-        train_loss, val_loss = np.mean(train_losses), np.mean(val_losses)
-        scheduler.step()
-        
-        if epoch % 10 == 0:
-            print(f"  Epoch {epoch}: train={train_loss:.4f}, val={val_loss:.4f}, lr={optimizer.param_groups[0]['lr']:.2e}")
-        
-        if val_loss < best_loss:
-            best_loss = val_loss
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            bad = 0
-        else:
-            bad += 1
-            if bad >= config.PATIENCE:
-                print(f"  Early stop at epoch {epoch}")
-                break
-    
-    if best_state:
-        model.load_state_dict(best_state)
-    
-    return model, best_loss
-
-# Enhanced feature engineering functions
+# feature engineering
 def height_to_feet(height_str):
     try:
         ft, inches = map(int, str(height_str).split('-'))
@@ -398,6 +72,7 @@ def height_to_feet(height_str):
     except:
         return 6.0
 
+# GNN-lite neighbor embedding computations
 class GNNLiteProcessor:
     def compute_neighbor_embeddings(self, input_df: pd.DataFrame) -> pd.DataFrame:
         cols_needed = ["game_id","play_id","nfl_id","frame_id","x","y",
@@ -410,7 +85,7 @@ class GNNLiteProcessor:
                    .rename(columns={"frame_id":"last_frame_id"})
                    .reset_index(drop=True))
 
-        # Join neighbors at the ego's last_frame_id
+        # join neighbors at the ego's last_frame_id
         tmp = last.merge(
             src.rename(columns={
                 "frame_id":"nb_frame_id", "nfl_id":"nfl_id_nb",
@@ -423,10 +98,10 @@ class GNNLiteProcessor:
             how="left",
         )
 
-        # Drop self
+        # drop self
         tmp = tmp[tmp["nfl_id_nb"] != tmp["nfl_id"]]
 
-        # Relative vectors
+        # relative vectors
         tmp["dx"]  = tmp["x_nb"] - tmp["x"]
         tmp["dy"]  = tmp["y_nb"] - tmp["y"]
         tmp["dvx"] = tmp["vx_nb"] - tmp["velocity_x"]
@@ -434,51 +109,74 @@ class GNNLiteProcessor:
         tmp["dist"] = np.sqrt(tmp["dx"]**2 + tmp["dy"]**2)
 
         tmp = tmp[np.isfinite(tmp["dist"])]
+        tmp = tmp[tmp["dist"] > 1e-6]
+        if Config.RADIUS is not None:
+            tmp = tmp[tmp["dist"] <= Config.RADIUS]
 
-        # Filter by radius and get top-K
-        tmp = tmp[tmp["dist"] <= TransformerConfig.RADIUS]
-        tmp = (tmp.sort_values(["game_id","play_id","nfl_id","dist"])
-                  .groupby(["game_id","play_id","nfl_id"])
-                  .head(TransformerConfig.K_NEIGH))
+        # ally / opp flag
+        tmp["is_ally"] = (tmp["player_side_nb"].fillna("") == tmp["player_side"].fillna("")).astype(np.float32)
 
-        # Compute embeddings with attention weights
-        tmp["weight"] = np.exp(-tmp["dist"] / TransformerConfig.TAU)
-        
-        # Aggregate neighbor features
-        agg_funcs = {
-            "dx": ["mean", "std", "min", "max"],
-            "dy": ["mean", "std", "min", "max"], 
-            "dvx": ["mean", "std"],
-            "dvy": ["mean", "std"],
-            "dist": ["mean", "min"],
-            "weight": ["sum"]
-        }
-        
-        neighbor_agg = (tmp.groupby(["game_id","play_id","nfl_id"])
-                           .agg(agg_funcs)
-                           .reset_index())
-        
-        # Flatten column names
-        neighbor_agg.columns = [
-            "_".join(col).strip() if col[1] else col[0] 
-            for col in neighbor_agg.columns.values
-        ]
-        
-        # Merge back to original
-        result = last.merge(neighbor_agg, on=["game_id","play_id","nfl_id"], how="left")
-        
-        # Fill missing values
-        neighbor_cols = [c for c in result.columns if any(x in c for x in ["dx_", "dy_", "dvx_", "dvy_", "dist_", "weight_"])]
-        result[neighbor_cols] = result[neighbor_cols].fillna(0)
-        
-        return result
+        # rank by distance (keep top-K)
+        keys = ["game_id","play_id","nfl_id"]
+        tmp["rnk"] = tmp.groupby(keys)["dist"].rank(method="first")
+        if Config.K_NEIGH is not None:
+            tmp = tmp[tmp["rnk"] <= float(Config.K_NEIGH)]
+
+        # attention weights: softmax(-dist/tau) within group
+        tmp["w"] = np.exp(-tmp["dist"] / float(Config.TAU))
+        sum_w = tmp.groupby(keys)["w"].transform("sum")
+        tmp["wn"] = np.where(sum_w > 0, tmp["w"]/sum_w, 0.0)
+
+        tmp["wn_ally"] = tmp["wn"] * tmp["is_ally"]
+        tmp["wn_opp"]  = tmp["wn"] * (1.0 - tmp["is_ally"])
+
+        # pre-multiply for group sums
+        for col in ["dx","dy","dvx","dvy"]:
+            tmp[f"{col}_ally_w"] = tmp[col] * tmp["wn_ally"]
+            tmp[f"{col}_opp_w"]  = tmp[col] * tmp["wn_opp"]
+
+        tmp["dist_ally"] = np.where(tmp["is_ally"] > 0.5, tmp["dist"], np.nan)
+        tmp["dist_opp"]  = np.where(tmp["is_ally"] < 0.5, tmp["dist"], np.nan)
+
+        ag = tmp.groupby(keys).agg(
+            gnn_ally_dx_mean = ("dx_ally_w", "sum"),
+            gnn_ally_dy_mean = ("dy_ally_w", "sum"),
+            gnn_ally_dvx_mean= ("dvx_ally_w","sum"),
+            gnn_ally_dvy_mean= ("dvy_ally_w","sum"),
+            gnn_opp_dx_mean  = ("dx_opp_w",  "sum"),
+            gnn_opp_dy_mean  = ("dy_opp_w",  "sum"),
+            gnn_opp_dvx_mean = ("dvx_opp_w", "sum"),
+            gnn_opp_dvy_mean = ("dvy_opp_w", "sum"),
+            gnn_ally_cnt     = ("is_ally",   "sum"),
+            gnn_opp_cnt      = ("is_ally",   lambda s: float(len(s) - s.sum())),
+            gnn_ally_dmin    = ("dist_ally", "min"),
+            gnn_ally_dmean   = ("dist_ally", "mean"),
+            gnn_opp_dmin     = ("dist_opp",  "min"),
+            gnn_opp_dmean    = ("dist_opp",  "mean"),
+        ).reset_index()
+
+        # d1..d3 nearest (regardless of side)
+        near = tmp.loc[tmp["rnk"]<=3, keys+["rnk","dist"]].copy()
+        near["rnk"] = near["rnk"].astype(int)
+        dwide = near.pivot_table(index=keys, columns="rnk", values="dist", aggfunc="first")
+        dwide = dwide.rename(columns={1:"gnn_d1",2:"gnn_d2",3:"gnn_d3"}).reset_index()
+        ag = ag.merge(dwide, on=keys, how="left")
+
+        # safe fills
+        for c in ["gnn_ally_dx_mean","gnn_ally_dy_mean","gnn_ally_dvx_mean","gnn_ally_dvy_mean",
+                  "gnn_opp_dx_mean","gnn_opp_dy_mean","gnn_opp_dvx_mean","gnn_opp_dvy_mean"]:
+            ag[c] = ag[c].fillna(0.0)
+        for c in ["gnn_ally_cnt","gnn_opp_cnt"]:
+            ag[c] = ag[c].fillna(0.0)
+        for c in ["gnn_ally_dmin","gnn_opp_dmin","gnn_ally_dmean","gnn_opp_dmean","gnn_d1","gnn_d2","gnn_d3"]:
+            ag[c] = ag[c].fillna(Config.RADIUS if Config.RADIUS is not None else 30.0)
+
+        return ag
 
 def add_advanced_features(df):
     df = df.copy()
     df = df.sort_values(['game_id', 'play_id', 'nfl_id', 'frame_id'])
     gcols = ['game_id', 'play_id', 'nfl_id']
-    
-    print("Adding advanced features...")
     
     # GROUP 1: Distance Rate Features (3)
     if 'distance_to_ball' in df.columns:
@@ -505,7 +203,7 @@ def add_advanced_features(df):
             )
     
     # GROUP 3: Multi-Window Rolling (24)
-    for window in [3, 5, 8]:  # Adjusted for longer sequences
+    for window in [3, 5, 10]:
         for col in ['velocity_x', 'velocity_y', 's', 'a']:
             if col in df.columns:
                 df[f'{col}_roll{window}'] = df.groupby(gcols)[col].transform(
@@ -515,13 +213,13 @@ def add_advanced_features(df):
                     lambda x: x.rolling(window, min_periods=1).std()
                 ).fillna(0)
     
-    # GROUP 4: Extended Lag Features (12)
-    for lag in [1, 2, 3, 4, 5, 6]:  # More lags for longer sequences
-        for col in ['x', 'y']:
+    # GROUP 4: Extended Lag Features (8)
+    for lag in [4, 5]:
+        for col in ['x', 'y', 'velocity_x', 'velocity_y']:
             if col in df.columns:
                 df[f'{col}_lag{lag}'] = df.groupby(gcols)[col].shift(lag).fillna(0)
     
-    # GROUP 5: Velocity and Acceleration Features (8)
+    # GROUP 5: Velocity Change Features (4)
     if 'velocity_x' in df.columns:
         df['velocity_x_change'] = df.groupby(gcols)['velocity_x'].diff().fillna(0)
         df['velocity_y_change'] = df.groupby(gcols)['velocity_y'].diff().fillna(0)
@@ -530,53 +228,42 @@ def add_advanced_features(df):
         df['direction_change'] = df['direction_change'].apply(
             lambda x: x if abs(x) < 180 else x - 360 * np.sign(x)
         )
-        
-        # Acceleration features
-        df['accel_magnitude'] = np.sqrt(df['acceleration_x']**2 + df['acceleration_y']**2)
-        df['jerk_x'] = df.groupby(gcols)['acceleration_x'].diff().fillna(0)
-        df['jerk_y'] = df.groupby(gcols)['acceleration_y'].diff().fillna(0)
     
-    # GROUP 6: Field Position Features (6)
+    # GROUP 6: Field Position Features (4)
     df['dist_from_left'] = df['y']
     df['dist_from_right'] = 53.3 - df['y']
     df['dist_from_sideline'] = np.minimum(df['dist_from_left'], df['dist_from_right'])
     df['dist_from_endzone'] = np.minimum(df['x'], 120 - df['x'])
-    df['field_zone_x'] = pd.cut(df['x'], bins=6, labels=False)  # Field zones
-    df['field_zone_y'] = pd.cut(df['y'], bins=4, labels=False)
     
-    # GROUP 7: Role-Specific Features (4)
+    # GROUP 7: Role-Specific Features (3)
     if 'is_receiver' in df.columns and 'velocity_alignment' in df.columns:
         df['receiver_optimality'] = df['is_receiver'] * df['velocity_alignment']
         df['receiver_deviation'] = df['is_receiver'] * np.abs(df.get('velocity_perpendicular', 0))
     if 'is_coverage' in df.columns and 'closing_speed' in df.columns:
         df['defender_closing_speed'] = df['is_coverage'] * df['closing_speed']
-        df['defender_angle_advantage'] = df['is_coverage'] * df.get('angle_to_ball', 0)
     
-    # GROUP 8: Temporal Features (4)
+    # GROUP 8: Time Features (2)
     df['frames_elapsed'] = df.groupby(gcols).cumcount()
     df['normalized_time'] = df.groupby(gcols)['frames_elapsed'].transform(
         lambda x: x / (x.max() + 1)
     )
-    df['time_since_snap'] = df['frames_elapsed'] * 0.1  # Convert to seconds
-    df['play_progress'] = df['normalized_time']  # Alias for clarity
     
     print(f"Total features after enhancement: {len(df.columns)}")
     
     return df
 
-def prepare_sequences_with_transformer_features(input_df, output_df=None, test_template=None, 
-                                               is_training=True, window_size=TransformerConfig.WINDOW_SIZE):
-    print(f"PREPARING SEQUENCES FOR TRANSFORMER")
+def prepare_sequences_with_advanced_features(input_df, output_df=None, test_template=None, 
+                                            is_training=True, window_size=Config.WINDOW_SIZE):
+    print(f"PREPARING SEQUENCES WITH ADVANCED FEATURES")
     print(f"Window size: {window_size}")
     
     input_df = input_df.copy()
     
     # BASIC FEATURES
-    print("Step 1/4: Adding basic features...")
+    print("Step 1/3: Adding basic features...")
     
     input_df['player_height_feet'] = input_df['player_height'].apply(height_to_feet)
     
-    # Enhanced physics calculations
     dir_rad = np.deg2rad(input_df['dir'].fillna(0))
     delta_t = 0.1
     input_df['velocity_x'] = (input_df['s'] + 0.5 * input_df['a'] * delta_t) * np.sin(dir_rad)
@@ -584,22 +271,20 @@ def prepare_sequences_with_transformer_features(input_df, output_df=None, test_t
     input_df['acceleration_x'] = input_df['a'] * np.sin(dir_rad)
     input_df['acceleration_y'] = input_df['a'] * np.cos(dir_rad)
     
-    # Player roles (enhanced)
+    # Roles
     input_df['is_offense'] = (input_df['player_side'] == 'Offense').astype(int)
     input_df['is_defense'] = (input_df['player_side'] == 'Defense').astype(int)
     input_df['is_receiver'] = (input_df['player_role'] == 'Targeted Receiver').astype(int)
     input_df['is_coverage'] = (input_df['player_role'] == 'Defensive Coverage').astype(int)
     input_df['is_passer'] = (input_df['player_role'] == 'Passer').astype(int)
-    input_df['is_rusher'] = (input_df['player_role'] == 'Pass Rush').astype(int)
     
-    # Enhanced physics
+    # Physics
     mass_kg = input_df['player_weight'].fillna(200.0) / 2.20462
     input_df['momentum_x'] = input_df['velocity_x'] * mass_kg
     input_df['momentum_y'] = input_df['velocity_y'] * mass_kg
     input_df['kinetic_energy'] = 0.5 * mass_kg * (input_df['s'] ** 2)
-    input_df['power'] = input_df['kinetic_energy'] * input_df['a']  # Power = Energy * Acceleration
     
-    # Ball features (enhanced)
+    # Ball features
     if 'ball_land_x' in input_df.columns:
         ball_dx = input_df['ball_land_x'] - input_df['x']
         ball_dy = input_df['ball_land_y'] - input_df['y']
@@ -611,155 +296,534 @@ def prepare_sequences_with_transformer_features(input_df, output_df=None, test_t
             input_df['velocity_x'] * input_df['ball_direction_x'] +
             input_df['velocity_y'] * input_df['ball_direction_y']
         )
-        
-        # Time to ball (physics-based)
-        input_df['time_to_ball'] = input_df['distance_to_ball'] / (input_df['s'] + 0.1)
-        input_df['ball_intercept_angle'] = np.abs(input_df['angle_to_ball'] - np.deg2rad(input_df['dir']))
     
-    # Sort for temporal operations
+    # Sort for temporal
     input_df = input_df.sort_values(['game_id', 'play_id', 'nfl_id', 'frame_id'])
     gcols = ['game_id', 'play_id', 'nfl_id']
     
-    # EMA features for smoother temporal modeling
-    alpha = 0.3
-    for col in ['velocity_x', 'velocity_y', 's', 'a']:
-        if col in input_df.columns:
-            input_df[f'{col}_ema'] = (input_df.groupby(gcols)[col]
-                                     .transform(lambda x: x.ewm(alpha=alpha).mean()))
+    # Original lag features (1-3)
+    for lag in [1, 2, 3]:
+        input_df[f'x_lag{lag}'] = input_df.groupby(gcols)['x'].shift(lag)
+        input_df[f'y_lag{lag}'] = input_df.groupby(gcols)['y'].shift(lag)
+        input_df[f'velocity_x_lag{lag}'] = input_df.groupby(gcols)['velocity_x'].shift(lag)
+        input_df[f'velocity_y_lag{lag}'] = input_df.groupby(gcols)['velocity_y'].shift(lag)
     
-    # STEP 2: GNN Features
-    print("Step 2/4: Adding GNN neighbor features...")
+    # EMA features
+    input_df['velocity_x_ema'] = input_df.groupby(gcols)['velocity_x'].transform(
+        lambda x: x.ewm(alpha=0.3, adjust=False).mean()
+    )
+    input_df['velocity_y_ema'] = input_df.groupby(gcols)['velocity_y'].transform(
+        lambda x: x.ewm(alpha=0.3, adjust=False).mean()
+    )
+    input_df['speed_ema'] = input_df.groupby(gcols)['s'].transform(
+        lambda x: x.ewm(alpha=0.3, adjust=False).mean()
+    )
+    
+    # ADVANCED FEATURES
+    print("Step 2/3: Adding advanced features...")
+    input_df = add_advanced_features(input_df)
+    
+    # GNN LITE FEATURES
+    print("Step 2.5/3: Adding GNN Lite features...")
     gnn_processor = GNNLiteProcessor()
-    neighbor_features = gnn_processor.compute_neighbor_embeddings(input_df)
+    gnn_features = gnn_processor.compute_neighbor_embeddings(input_df)
     
-    # Merge neighbor features
+    # Merge GNN features back to input_df
     input_df = input_df.merge(
-        neighbor_features[['game_id', 'play_id', 'nfl_id'] + 
-                        [c for c in neighbor_features.columns if 'dx_' in c or 'dy_' in c or 'dist_' in c]],
+        gnn_features,
         on=['game_id', 'play_id', 'nfl_id'],
         how='left'
     )
     
-    # STEP 3: Advanced Features
-    print("Step 3/4: Adding advanced spatio-temporal features...")
-    input_df = add_advanced_features(input_df)
+    # Fill NaN values for GNN features
+    gnn_cols = [c for c in input_df.columns if c.startswith('gnn_')]
+    for col in gnn_cols:
+        if col in ['gnn_ally_cnt', 'gnn_opp_cnt']:
+            input_df[col] = input_df[col].fillna(0.0)
+        elif 'mean' in col or 'dx' in col or 'dy' in col or 'dvx' in col or 'dvy' in col:
+            input_df[col] = input_df[col].fillna(0.0)
+        else:  # distance features
+            input_df[col] = input_df[col].fillna(Config.RADIUS)
     
-    # STEP 4: Sequence Creation
-    print("Step 4/4: Creating sequences...")
+    # FEATURE LIST
+    print("Step 3/3: Creating sequences...")
     
-    # Select features for modeling (exclude identifiers and targets)
-    exclude_cols = ['game_id', 'play_id', 'nfl_id', 'frame_id', 'player_name', 
-                   'player_position', 'player_role', 'player_side', 'play_direction',
-                   'player_birth_date', 'player_height', 'player_weight']
+    feature_cols = [
+        # Core (9)
+        'x', 'y', 's', 'a', 'o', 'dir', 'frame_id', 'ball_land_x', 'ball_land_y',
+        
+        # Player (2)
+        'player_height_feet', 'player_weight',
+        
+        # Motion (7)
+        'velocity_x', 'velocity_y', 'acceleration_x', 'acceleration_y',
+        'momentum_x', 'momentum_y', 'kinetic_energy',
+        
+        # Roles (5)
+        'is_offense', 'is_defense', 'is_receiver', 'is_coverage', 'is_passer',
+        
+        # Ball (5)
+        'distance_to_ball', 'angle_to_ball', 'ball_direction_x', 'ball_direction_y', 'closing_speed',
+        
+        # Original temporal (15)
+        'x_lag1', 'y_lag1', 'velocity_x_lag1', 'velocity_y_lag1',
+        'x_lag2', 'y_lag2', 'velocity_x_lag2', 'velocity_y_lag2',
+        'x_lag3', 'y_lag3', 'velocity_x_lag3', 'velocity_y_lag3',
+        'velocity_x_ema', 'velocity_y_ema', 'speed_ema',
+        
+        # NEW: Distance rate (3)
+        'distance_to_ball_change', 'distance_to_ball_accel', 'time_to_intercept',
+        
+        # NEW: Target alignment (3)
+        'velocity_alignment', 'velocity_perpendicular', 'accel_alignment',
+        
+        # NEW: Multi-window rolling (24)
+        'velocity_x_roll3', 'velocity_x_std3', 'velocity_y_roll3', 'velocity_y_std3',
+        's_roll3', 's_std3', 'a_roll3', 'a_std3',
+        'velocity_x_roll5', 'velocity_x_std5', 'velocity_y_roll5', 'velocity_y_std5',
+        's_roll5', 's_std5', 'a_roll5', 'a_std5',
+        'velocity_x_roll10', 'velocity_x_std10', 'velocity_y_roll10', 'velocity_y_std10',
+        's_roll10', 's_std10', 'a_roll10', 'a_std10',
+        
+        # NEW: Extended lags (8)
+        'x_lag4', 'y_lag4', 'velocity_x_lag4', 'velocity_y_lag4',
+        'x_lag5', 'y_lag5', 'velocity_x_lag5', 'velocity_y_lag5',
+        
+        # NEW: Velocity changes (4)
+        'velocity_x_change', 'velocity_y_change', 'speed_change', 'direction_change',
+        
+        # NEW: Field position (4)
+        'dist_from_sideline', 'dist_from_endzone',
+        
+        # NEW: Role-specific (3)
+        'receiver_optimality', 'receiver_deviation', 'defender_closing_speed',
+        
+        # NEW: Time (2)
+        'frames_elapsed', 'normalized_time',
+        
+        # GNN LITE FEATURES (20)
+        'gnn_ally_cnt', 'gnn_opp_cnt',
+        'gnn_ally_dx_mean', 'gnn_ally_dy_mean', 'gnn_ally_dvx_mean', 'gnn_ally_dvy_mean',
+        'gnn_opp_dx_mean', 'gnn_opp_dy_mean', 'gnn_opp_dvx_mean', 'gnn_opp_dvy_mean',
+        'gnn_ally_dist_1', 'gnn_ally_dist_2', 'gnn_ally_dist_3',
+        'gnn_opp_dist_1', 'gnn_opp_dist_2', 'gnn_opp_dist_3',
+        'gnn_nearest_ally_dist', 'gnn_nearest_opp_dist',
+        'gnn_ally_attention_sum', 'gnn_opp_attention_sum',
+    ]
     
-    # Encode play_direction as numeric before creating feature columns
-    if 'play_direction' in input_df.columns:
-        input_df['play_direction_encoded'] = (input_df['play_direction'] == 'right').astype(int)
+    # Filter to existing
+    feature_cols = [c for c in feature_cols if c in input_df.columns]
+    print(f"Using {len(feature_cols)} features (was ~50, now ~90)")
     
-    feature_cols = [c for c in input_df.columns if c not in exclude_cols]
+    # CREATE SEQUENCES
+    input_df.set_index(['game_id', 'play_id', 'nfl_id'], inplace=True)
+    grouped = input_df.groupby(level=['game_id', 'play_id', 'nfl_id'])
     
-    print(f"Using {len(feature_cols)} features for modeling")
+    target_rows = output_df if is_training else test_template
+    target_groups = target_rows[['game_id', 'play_id', 'nfl_id']].drop_duplicates()
     
-    # Create sequences
+    # Pre-compute group means for faster fillna operations
+    print("Pre-computing group statistics...")
+    group_means = grouped.mean(numeric_only=True)
+    
+    # Pre-create output lookup dictionary for training
+    output_lookup = {}
+    if is_training:
+        print("Creating output lookup dictionary...")
+        for _, row in output_df.iterrows():
+            key = (row['game_id'], row['play_id'], row['nfl_id'])
+            if key not in output_lookup:
+                output_lookup[key] = []
+            output_lookup[key].append({
+                'x': row['x'], 'y': row['y'], 'frame_id': row['frame_id']
+            })
+        
+        # Sort each group by frame_id
+        for key in output_lookup:
+            output_lookup[key] = sorted(output_lookup[key], key=lambda x: x['frame_id'])
+    
     sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = [], [], [], [], []
     
-    grouped = input_df.groupby(['game_id', 'play_id', 'nfl_id'])
+    # Convert target_groups to list of tuples for faster iteration
+    target_keys = [(row['game_id'], row['play_id'], row['nfl_id']) 
+                   for _, row in target_groups.iterrows()]
     
-    for (game_id, play_id, nfl_id), group in tqdm(grouped, desc="Creating sequences"):
-        group = group.sort_values('frame_id').reset_index(drop=True)
-        
-        if len(group) < window_size:
+    # Pre-allocate arrays for better memory efficiency
+    num_sequences = len(target_keys)
+    print(f"Processing {num_sequences} sequences...")
+    
+    # Pre-allocate lists with estimated capacity
+    sequences = []
+    if is_training:
+        targets_dx = []
+        targets_dy = []
+        targets_frame_ids = []
+    sequence_ids = []
+    for key in tqdm(target_keys, desc="Creating sequences"):
+        try:
+            group_df = grouped.get_group(key)
+        except KeyError:
             continue
+        
+        input_window = group_df.tail(window_size)
+        
+        if len(input_window) < window_size:
+            if is_training:
+                continue
+            pad_len = window_size - len(input_window)
+            pad_df = pd.DataFrame(np.nan, index=range(pad_len), columns=input_window.columns)
+            input_window = pd.concat([pad_df, input_window], ignore_index=True)
+        
+        # Use pre-computed means for faster fillna
+        if key in group_means.index:
+            input_window = input_window.fillna(group_means.loc[key])
+        else:
+            input_window = input_window.fillna(0.0)
+        
+        seq = input_window[feature_cols].values
+        
+        if np.isnan(seq).any():
+            if is_training:
+                continue
+            seq = np.nan_to_num(seq, nan=0.0)
+        
+        sequences.append(seq)
+        
+        if is_training and key in output_lookup:
+            out_data = output_lookup[key]
             
-        # Create sequence
-        seq_data = group[feature_cols].values
-        if len(seq_data) >= window_size:
-            sequence = seq_data[-window_size:]  # Take last window_size frames
-            sequences.append(sequence)
+            last_x = input_window.iloc[-1]['x']
+            last_y = input_window.iloc[-1]['y']
             
-            sequence_ids.append({
-                'game_id': game_id,
-                'play_id': play_id, 
-                'nfl_id': nfl_id
-            })
+            dx = np.array([d['x'] for d in out_data]) - last_x
+            dy = np.array([d['y'] for d in out_data]) - last_y
+            frame_ids = np.array([d['frame_id'] for d in out_data])
             
-            if is_training and output_df is not None:
-                # Get targets
-                target_data = output_df[
-                    (output_df['game_id'] == game_id) &
-                    (output_df['play_id'] == play_id) &
-                    (output_df['nfl_id'] == nfl_id)
-                ].sort_values('frame_id')
-                
-                if len(target_data) > 0:
-                    # Get last position from input sequence
-                    last_x = group.iloc[-1]['x']
-                    last_y = group.iloc[-1]['y']
-                    
-                    # Compute dx, dy as differences from last position
-                    dx_vals = target_data['x'].values - last_x
-                    dy_vals = target_data['y'].values - last_y
-                    frame_ids = target_data['frame_id'].values
-                    
-                    targets_dx.append(dx_vals)
-                    targets_dy.append(dy_vals)
-                    targets_frame_ids.append(frame_ids)
-                else:
-                    # Remove sequence if no targets
-                    sequences.pop()
-                    sequence_ids.pop()
+            targets_dx.append(dx)
+            targets_dy.append(dy)
+            targets_frame_ids.append(frame_ids)
+        
+        sequence_ids.append({
+            'game_id': key[0],
+            'play_id': key[1],
+            'nfl_id': key[2],
+            'frame_id': input_window.iloc[-1]['frame_id']
+        })
     
-    print(f"Created {len(sequences)} sequences")
+    print(f"Created {len(sequences)} sequences with {len(feature_cols)} features each")
     
     if is_training:
         return sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids
-    else:
-        return sequences, sequence_ids
+    return sequences, sequence_ids
 
-def train_transformer_model_integrated(X_train, y_train, X_val, y_val, input_dim, horizon, config):
-    """Integrated training function for Transformer model"""
-    device = config.DEVICE
-    model = SpatioTemporalTransformer(input_dim, horizon, config).to(device)
+# loss
+class TemporalHuber(nn.Module):
+    def __init__(self, delta=0.5, time_decay=0.03):
+        super().__init__()
+        self.delta = delta
+        self.time_decay = time_decay
     
-    criterion = TemporalHuberLoss(delta=0.5, time_decay=0.02, velocity_weight=0.15)
-    optimizer = torch.optim.AdamW(
-        model.parameters(), 
-        lr=config.LEARNING_RATE, 
-        weight_decay=1e-4,
-        betas=(0.9, 0.999)
-    )
+    def forward(self, pred, target, mask):
+        err = pred - target
+        abs_err = torch.abs(err)
+        huber = torch.where(abs_err <= self.delta, 0.5 * err * err, 
+                           self.delta * (abs_err - 0.5 * self.delta))
+        
+        if self.time_decay > 0:
+            L = pred.size(1)
+            t = torch.arange(L, device=pred.device).float()
+            weight = torch.exp(-self.time_decay * t).view(1, L)
+            huber, mask = huber * weight, mask * weight
+        
+        return (huber * mask).sum() / (mask.sum() + 1e-8)
+
+# ========================= Spatio-Temporal Transformer =========================
+# The following model augments the existing temporal components with a robust
+# spatial attention stage inspired by spatio-temporal transformer best practices
+# in video/sign-language recognition, traffic prediction, and HAR literature.
+
+# Key ideas:
+# - Per-timestep spatial attention across feature tokens (feature-as-token),
+#   capturing interactions between positional (x,y), motion, ball, role, and
+#   neighbor (GNN-lite) features.
+# - 2D field-aware positional encoding for (x,y) coordinates.
+# - Temporal transformer across timesteps to model long-range dependencies,
+#   while retaining the existing GRU path as a residual for stability.
+# - Attention pooling to form a sequence summary for horizon prediction.
+
+# References for design inspiration: STTN (Spatial–Temporal Transformer Network)
+# for CSLR [0], STPT for traffic forecasting [1], STGT for HAR [2], and general
+# spatio-temporal feature engineering guidance [3,4].
+
+class STTransformer(nn.Module):
+    """
+    Spatio-Temporal Transformer for next-position delta prediction.
+
+    Architecture overview:
+    1) Feature Tokenizer (spatial):
+       - Treat each scalar feature as a token (feature-as-token).
+       - Token embedding = value * W_value[j] + E_feature[j].
+       - Adds a field-aware 2D (x,y) positional token and a [CLS] token.
+       - Run a small TransformerEncoder across tokens per timestep to build
+         a spatial context vector for that timestep.
+
+    2) Temporal Transformer:
+       - Add sinusoidal temporal positional encoding.
+       - TransformerEncoder across timesteps to capture long-range temporal
+         dependencies.
+       - Retain a GRU path (from the original model) and combine via a learnable
+         gate to maintain prior temporal behavior and improve stability.
+
+    3) Sequence Summary and Prediction Head:
+       - Attention pooling and query-based pooling combine to form a compact
+         sequence representation.
+       - MLP head produces horizon deltas that are cumulative-summed.
+
+    Notes:
+    - Spatial attention operates over feature groups implicitly via the token
+      mechanism, capturing location-based relations (e.g., x,y with neighbor
+      features) similar in spirit to spatial modules in STTN [0], STPT [1], and
+      STGT [2].
+    - Temporal transformer replaces pure RNN reliance and mitigates error
+      propagation over long horizons [1], while the GRU path preserves existing
+      temporal functionality.
+    """
+    def __init__(self, input_dim: int, horizon: int, d_model: int = 128,
+                 n_heads: int = 4, spatial_layers: int = 2, temporal_layers: int = 2,
+                 dropout: float = 0.1):
+        super().__init__()
+        self.horizon = horizon
+        self.input_dim = input_dim
+        self.d_model = d_model
+        self.n_heads = n_heads
+
+        # --- Feature-as-token embeddings ---
+        # Each feature j has:
+        # - W_value[j]: maps scalar value to d_model vector
+        # - E_feature[j]: learnable embedding identifying the feature
+        self.W_value = nn.Parameter(torch.randn(input_dim, d_model) * 0.01)
+        self.E_feature = nn.Parameter(torch.randn(input_dim, d_model) * 0.02)
+        self.token_dropout = nn.Dropout(dropout)
+        self.token_ln = nn.LayerNorm(d_model)
+
+        # --- 2D field-aware positional token for (x, y) ---
+        # We add sinusoidal projections of normalized (x,y) to encode spatial
+        # location. This follows best practices for modeling spatial structure.
+        self.num_xy_freqs = 8
+        xy_in_dim = 2 + 4 * self.num_xy_freqs  # [x_norm, y_norm] + sin/cos pairs
+        self.xy_proj = nn.Sequential(
+            nn.Linear(xy_in_dim, d_model), nn.GELU(), nn.LayerNorm(d_model)
+        )
+
+        # [CLS] token for spatial encoder pooling
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+
+        # --- Spatial encoder over tokens per timestep ---
+        spatial_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=n_heads, dim_feedforward=d_model * 4,
+            dropout=dropout, batch_first=True, norm_first=True
+        )
+        self.spatial_encoder = nn.TransformerEncoder(spatial_layer, num_layers=spatial_layers)
+
+        # --- Temporal Transformer ---
+        temporal_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=n_heads, dim_feedforward=d_model * 4,
+            dropout=dropout, batch_first=True, norm_first=True
+        )
+        self.temporal_encoder = nn.TransformerEncoder(temporal_layer, num_layers=temporal_layers)
+
+        # --- Retain GRU path to maintain existing temporal functionality ---
+        self.gru = nn.GRU(input_dim, 128, num_layers=2, batch_first=True, dropout=0.15)
+        self.gru_ln = nn.LayerNorm(128)
+        self.gru_to_d = nn.Linear(128, d_model)
+
+        # --- Attention pooling components (as in original model) ---
+        self.attention_pooling = nn.Sequential(
+            nn.Linear(d_model, 64), nn.Tanh(), nn.Linear(64, 1), nn.Softmax(dim=1)
+        )
+        self.pool_ln = nn.LayerNorm(d_model)
+        self.pool_attn = nn.MultiheadAttention(d_model, num_heads=n_heads, batch_first=True)
+        self.pool_query = nn.Parameter(torch.randn(1, 1, d_model))
+
+        # Learnable combination of pooling methods and GRU/Transformer paths
+        self.pooling_weight = nn.Parameter(torch.tensor(0.5))  # between attn pooling and query pooling
+        self.temporal_gate = nn.Parameter(torch.tensor(0.5))   # between transformer and GRU paths
+
+        # Prediction head
+        self.head = nn.Sequential(
+            nn.Linear(d_model, 128), nn.GELU(), nn.Dropout(0.2),
+            nn.Linear(128, 64), nn.GELU(), nn.Dropout(0.1),
+            nn.Linear(64, horizon)
+        )
+
+    def _build_xy_token(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Build a field-aware positional token from (x,y).
+        x: (B, T, D) where D >= 2 and x[...,0]=x, x[...,1]=y as per feature_cols.
+        Returns: xy_token (B, T, d_model).
+        """
+        B, T, D = x.shape
+        x_coord = x[:, :, 0]
+        y_coord = x[:, :, 1]
+        # Normalize to [0,1] using field bounds
+        x_norm = (x_coord - Config.FIELD_X_MIN) / (Config.FIELD_X_MAX - Config.FIELD_X_MIN + 1e-6)
+        y_norm = (y_coord - Config.FIELD_Y_MIN) / (Config.FIELD_Y_MAX - Config.FIELD_Y_MIN + 1e-6)
+        x_norm = torch.clamp(x_norm, 0.0, 1.0)
+        y_norm = torch.clamp(y_norm, 0.0, 1.0)
+        # Sin/cos projections at multiple frequencies
+        feats = [x_norm, y_norm]
+        for k in range(self.num_xy_freqs):
+            freq = 2.0 ** k * 2.0 * np.pi
+            feats.append(torch.sin(freq * x_norm))
+            feats.append(torch.cos(freq * x_norm))
+            feats.append(torch.sin(freq * y_norm))
+            feats.append(torch.cos(freq * y_norm))
+        xy_feat = torch.stack(feats, dim=-1)  # (B, T, xy_in_dim)
+        xy_token = self.xy_proj(xy_feat)      # (B, T, d_model)
+        return xy_token
+
+    def _feature_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Convert feature matrix to tokens via feature-as-token embedding.
+        x: (B, T, D). Returns tokens: (B*T, D, d_model).
+        """
+        B, T, D = x.shape
+        x_bt_d = x.reshape(B * T, D)
+        # tokens[j] = value_j * W_value[j] + E_feature[j]
+        # Broadcast over batch: (B*T, D, 1) * (D, d_model) + (D, d_model)
+        val = x_bt_d.unsqueeze(-1) * self.W_value.unsqueeze(0)  # (B*T, D, d_model)
+        tokens = val + self.E_feature.unsqueeze(0)
+        tokens = self.token_ln(tokens)
+        tokens = self.token_dropout(tokens)
+        return tokens
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, T, D)
+        returns: cumulative deltas of shape (B, horizon)
+        """
+        B, T, D = x.shape
+        device = x.device
+
+        # --- Spatial stage (per timestep) ---
+        tokens = self._feature_tokens(x)             # (B*T, D, d_model)
+        xy_token = self._build_xy_token(x)           # (B, T, d_model)
+        xy_bt = xy_token.reshape(B * T, 1, self.d_model)
+        cls = self.cls_token.expand(B * T, -1, -1)   # (B*T, 1, d_model)
+        spatial_seq = torch.cat([cls, xy_bt, tokens], dim=1)  # (B*T, 2 + D, d_model)
+        spatial_out = self.spatial_encoder(spatial_seq)       # (B*T, 2 + D, d_model)
+        # Take [CLS] output as spatial context for the timestep
+        spatial_ctx = spatial_out[:, 0, :].reshape(B, T, self.d_model)  # (B, T, d_model)
+
+        # --- Temporal stage ---
+        # Temporal positional encoding (sinusoidal)
+        pos = torch.arange(T, device=device).float()
+        pe = torch.zeros(T, self.d_model, device=device)
+        div_term = torch.exp(torch.arange(0, self.d_model, 2, device=device) * (-np.log(10000.0) / self.d_model))
+        pe[:, 0::2] = torch.sin(pos.unsqueeze(1) * div_term)
+        pe[:, 1::2] = torch.cos(pos.unsqueeze(1) * div_term)
+        temporal_in = spatial_ctx + pe.unsqueeze(0)  # (B, T, d_model)
+        temporal_out = self.temporal_encoder(temporal_in)     # (B, T, d_model)
+
+        # --- GRU residual path (maintain existing temporal functionality) ---
+        h_gru, _ = self.gru(x)             # (B, T, 128)
+        h_gru = self.gru_ln(h_gru)
+        h_gru_proj = self.gru_to_d(h_gru)  # (B, T, d_model)
+        # Combine transformer and GRU paths via learnable gate
+        beta = torch.sigmoid(self.temporal_gate)
+        h_seq = beta * temporal_out + (1.0 - beta) * h_gru_proj  # (B, T, d_model)
+
+        # --- Sequence summarization ---
+        # Method 1: attention pooling over timesteps
+        att_w = self.attention_pooling(h_seq)           # (B, T, 1)
+        ctx1 = torch.sum(att_w * h_seq, dim=1)          # (B, d_model)
+        # Method 2: query-based pooling (multi-head attention)
+        q = self.pool_query.expand(B, -1, -1)           # (B, 1, d_model)
+        ctx2, _ = self.pool_attn(q, self.pool_ln(h_seq), self.pool_ln(h_seq))
+        ctx2 = ctx2.squeeze(1)                          # (B, d_model)
+        # Learnable blend
+        alpha = torch.sigmoid(self.pooling_weight)
+        ctx = alpha * ctx1 + (1.0 - alpha) * ctx2       # (B, d_model)
+
+        # --- Prediction head ---
+        out = self.head(ctx)                            # (B, horizon)
+        return torch.cumsum(out, dim=1)
+
+# Custom Dataset class for proper DataLoader usage
+class NFLDataset(torch.utils.data.Dataset):
+    def __init__(self, sequences, targets, horizon):
+        self.sequences = sequences
+        self.targets = targets
+        self.horizon = horizon
+        
+    def __len__(self):
+        return len(self.sequences)
     
-    # Enhanced scheduler with warm restarts
-    scheduler = CosineAnnealingLR(optimizer, T_max=config.EPOCHS//3, eta_min=1e-6)
+    def __getitem__(self, idx):
+        sequence = torch.tensor(self.sequences[idx].astype(np.float32))
+        target = self.targets[idx]
+        
+        # Prepare target with padding and mask
+        L = len(target)
+        padded_target = np.pad(target, (0, self.horizon - L), constant_values=0).astype(np.float32)
+        mask = np.zeros(self.horizon, dtype=np.float32)
+        mask[:L] = 1.0
+        
+        return sequence, torch.tensor(padded_target), torch.tensor(mask)
+
+# Custom collate function for variable length sequences
+def collate_fn(batch):
+    sequences, targets, masks = zip(*batch)
+    sequences = torch.stack(sequences)
+    targets = torch.stack(targets)
+    masks = torch.stack(masks)
+    return sequences, targets, masks
+
+def train_model(X_train, y_train, X_val, y_val, input_dim, horizon, Config):
+    device = Config.DEVICE
+    # Instantiate the new Spatio-Temporal Transformer model
+    model = STTransformer(
+        input_dim,
+        horizon,
+        d_model=Config.ST_D_MODEL,
+        n_heads=Config.ST_N_HEADS,
+        spatial_layers=Config.ST_SPATIAL_LAYERS,
+        temporal_layers=Config.ST_TEMPORAL_LAYERS,
+        dropout=Config.ST_DROPOUT,
+    ).to(device)
+    
+    criterion = TemporalHuber(delta=0.5, time_decay=0.03)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
     
     # Create datasets and dataloaders
     train_dataset = NFLDataset(X_train, y_train, horizon)
     val_dataset = NFLDataset(X_val, y_val, horizon)
     
+    # Optimize DataLoader for CUDA when available; keep MPS-friendly defaults otherwise
+    nw = 2 if device.type == "cuda" else 0
+    pin = True if device.type == "cuda" else False
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=config.BATCH_SIZE, 
+        batch_size=Config.BATCH_SIZE, 
         shuffle=True, 
         collate_fn=collate_fn,
-        num_workers=0,
-        pin_memory=False
+        num_workers=nw,
+        pin_memory=pin
     )
     
     val_loader = DataLoader(
         val_dataset, 
-        batch_size=config.BATCH_SIZE, 
+        batch_size=Config.BATCH_SIZE, 
         shuffle=False, 
         collate_fn=collate_fn,
-        num_workers=0,
-        pin_memory=False
+        num_workers=nw,
+        pin_memory=pin
     )
     
     best_loss, best_state, bad = float('inf'), None, 0
     
-    print(f"Training Transformer with {sum(p.numel() for p in model.parameters())} parameters")
-    print(f"Input dimension: {input_dim}, Horizon: {horizon}")
-    
-    for epoch in range(1, config.EPOCHS + 1):
+    for epoch in range(1, Config.EPOCHS + 1):
         model.train()
         train_losses = []
         
@@ -773,11 +837,9 @@ def train_transformer_model_integrated(X_train, y_train, X_val, y_val, input_dim
             
             optimizer.zero_grad()
             loss.backward()
-            
-            # Gradient clipping for stability
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            
             optimizer.step()
+            
             train_losses.append(loss.item())
         
         model.eval()
@@ -792,10 +854,10 @@ def train_transformer_model_integrated(X_train, y_train, X_val, y_val, input_dim
                 val_losses.append(criterion(pred, targets, masks).item())
         
         train_loss, val_loss = np.mean(train_losses), np.mean(val_losses)
-        scheduler.step()
+        scheduler.step(val_loss)
         
-        if epoch % 20 == 0:
-            print(f"  Epoch {epoch}: train={train_loss:.4f}, val={val_loss:.4f}, lr={optimizer.param_groups[0]['lr']:.2e}")
+        if epoch % 10 == 0:
+            print(f"  Epoch {epoch}: train={train_loss:.4f}, val={val_loss:.4f}")
         
         if val_loss < best_loss:
             best_loss = val_loss
@@ -803,7 +865,7 @@ def train_transformer_model_integrated(X_train, y_train, X_val, y_val, input_dim
             bad = 0
         else:
             bad += 1
-            if bad >= config.PATIENCE:
+            if bad >= Config.PATIENCE:
                 print(f"  Early stop at epoch {epoch}")
                 break
     
@@ -812,134 +874,71 @@ def train_transformer_model_integrated(X_train, y_train, X_val, y_val, input_dim
     
     return model, best_loss
 
+# main pipeline
 def main():
-    from datetime import datetime
+    # Load
+    print("\n[1/4] Loading data...")
+    train_input_files = [Config.DATA_DIR / f"train/input_2023_w{w:02d}.csv" for w in range(1, 19)]
+    train_output_files = [Config.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
+    train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
+    train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
+    test_input = pd.read_csv(Config.DATA_DIR / "test_input.csv")
+    test_template = pd.read_csv(Config.DATA_DIR / "test.csv")
     
-    config = TransformerConfig()
-    set_seed(config.SEED)
-    
-    # Create cache directory
-    cache_dir = Path("nn/data_npy")
-    cache_dir.mkdir(exist_ok=True)
-    
-    # Define cache file paths
-    cache_sequences = cache_dir / "transformer_sequences.pkl"
-    cache_targets_dx = cache_dir / "transformer_targets_dx.pkl"
-    cache_targets_dy = cache_dir / "transformer_targets_dy.pkl"
-    cache_targets_frame_ids = cache_dir / "transformer_targets_frame_ids.pkl"
-    cache_sequence_ids = cache_dir / "transformer_sequence_ids.pkl"
-    
-    # Check if cached data exists
-    if (cache_sequences.exists() and cache_targets_dx.exists() and 
-        cache_targets_dy.exists() and cache_targets_frame_ids.exists() and 
-        cache_sequence_ids.exists()):
-        print("\n[1/4] Loading cached data...")
-        import pickle
-        with open(cache_sequences, 'rb') as f:
-            sequences = pickle.load(f)
-        with open(cache_targets_dx, 'rb') as f:
-            targets_dx = pickle.load(f)
-        with open(cache_targets_dy, 'rb') as f:
-            targets_dy = pickle.load(f)
-        with open(cache_targets_frame_ids, 'rb') as f:
-            targets_frame_ids = pickle.load(f)
-        with open(cache_sequence_ids, 'rb') as f:
-            sequence_ids = pickle.load(f)
-        print("Cached data loaded successfully!")
-    else:
-        # Load data
-        print("\n[1/4] Loading data...")
-        train_input_files = [config.DATA_DIR / f"train/input_2023_w{w:02d}.csv" for w in range(1, 19)]
-        train_output_files = [config.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
-        train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
-        train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
-        test_input = pd.read_csv(config.DATA_DIR / "test_input.csv")
-        test_template = pd.read_csv(config.DATA_DIR / "test.csv")
-        
-        # Prepare sequences with Transformer-optimized features
-        print("\n[2/4] Preparing sequences with Transformer features...")
-        sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = prepare_sequences_with_transformer_features(
-            train_input, train_output, is_training=True, window_size=config.WINDOW_SIZE
-        )
-        
-        # Save processed data to cache
-        print("Saving processed data to cache...")
-        import pickle
-        with open(cache_sequences, 'wb') as f:
-            pickle.dump(sequences, f)
-        with open(cache_targets_dx, 'wb') as f:
-            pickle.dump(targets_dx, f)
-        with open(cache_targets_dy, 'wb') as f:
-            pickle.dump(targets_dy, f)
-        with open(cache_targets_frame_ids, 'wb') as f:
-            pickle.dump(targets_frame_ids, f)
-        with open(cache_sequence_ids, 'wb') as f:
-            pickle.dump(sequence_ids, f)
-        print("Data cached successfully!")
+    # Prepare with advanced features
+    print("\n[2/4] Preparing with ADVANCED features...")
+    sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = prepare_sequences_with_advanced_features(
+        train_input, train_output, is_training=True, window_size=Config.WINDOW_SIZE
+    )
     
     sequences = np.array(sequences, dtype=object)
     targets_dx = np.array(targets_dx, dtype=object)
     targets_dy = np.array(targets_dy, dtype=object)
     
-    # Cross-validation training
-    print("\n[3/4] Training Transformer models...")
+    # Train
+    print("\n[3/4] Training with enhanced features...")
     groups = np.array([d['game_id'] for d in sequence_ids])
-    gkf = GroupKFold(n_splits=config.N_FOLDS)
+    gkf = GroupKFold(n_splits=Config.N_FOLDS)
     
     models_x, models_y, scalers = [], [], []
-    fold_scores = []
     
     for fold, (tr, va) in enumerate(gkf.split(sequences, groups=groups), 1):
         print(f"\n{'='*60}")
-        print(f"Fold {fold}/{config.N_FOLDS}")
+        print(f"Fold {fold}/{Config.N_FOLDS}")
         print(f"{'='*60}")
         
         X_tr, X_va = sequences[tr], sequences[va]
         
-        # Standardization
         scaler = StandardScaler()
         scaler.fit(np.vstack([s for s in X_tr]))
         
         X_tr_sc = np.stack([scaler.transform(s) for s in X_tr])
         X_va_sc = np.stack([scaler.transform(s) for s in X_va])
         
-        input_dim = X_tr[0].shape[-1]
-        
-        # Train X-axis model
-        print("Training X-axis Transformer...")
-        mx, loss_x = train_transformer_model_integrated(
+        # Train X
+        print("Training X-axis model...")
+        mx, loss_x = train_model(
             X_tr_sc, targets_dx[tr], X_va_sc, targets_dx[va],
-            input_dim, config.MAX_FUTURE_HORIZON, config
+            X_tr[0].shape[-1], Config.MAX_FUTURE_HORIZON, Config
         )
         
-        # Train Y-axis model
-        print("Training Y-axis Transformer...")
-        my, loss_y = train_transformer_model_integrated(
+        # Train Y
+        print("Training Y-axis model...")
+        my, loss_y = train_model(
             X_tr_sc, targets_dy[tr], X_va_sc, targets_dy[va],
-            input_dim, config.MAX_FUTURE_HORIZON, config
+            X_tr[0].shape[-1], Config.MAX_FUTURE_HORIZON, Config
         )
         
         models_x.append(mx)
         models_y.append(my)
         scalers.append(scaler)
         
-        avg_loss = (loss_x + loss_y) / 2
-        fold_scores.append(avg_loss)
-        
-        print(f"\nFold {fold} - X loss: {loss_x:.5f}, Y loss: {loss_y:.5f}, Avg: {avg_loss:.5f}")
-    
-    # Print overall performance
-    mean_score = np.mean(fold_scores)
-    std_score = np.std(fold_scores)
-    print(f"\n{'='*60}")
-    print(f"TRANSFORMER MODEL PERFORMANCE")
-    print(f"{'='*60}")
-    print(f"Mean CV Score: {mean_score:.5f} ± {std_score:.5f}")
+        print(f"\nFold {fold} - X loss: {loss_x:.5f}, Y loss: {loss_y:.5f}")
     
     # Test predictions
     print("\n[4/4] Creating test predictions...")
-    test_sequences, test_ids = prepare_sequences_with_transformer_features(
-        test_input, test_template=test_template, is_training=False, window_size=config.WINDOW_SIZE
+    test_sequences, test_ids = prepare_sequences_with_advanced_features(
+        test_input, test_template=test_template, is_training=False, window_size=Config.WINDOW_SIZE
     )
     
     X_test = np.array(test_sequences, dtype=object)
@@ -950,7 +949,7 @@ def main():
     all_dx, all_dy = [], []
     for mx, my, sc in zip(models_x, models_y, scalers):
         X_sc = np.stack([sc.transform(s) for s in X_test])
-        X_t = torch.tensor(X_sc.astype(np.float32)).to(config.DEVICE)
+        X_t = torch.tensor(X_sc.astype(np.float32)).to(Config.DEVICE)
         
         mx.eval()
         my.eval()
@@ -985,21 +984,9 @@ def main():
             })
     
     submission = pd.DataFrame(rows)
+    submission.to_csv("submission.csv", index=False)
     
-    # Save with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    submission_file = f"submission_transformer_{timestamp}.csv"
-    submission.to_csv(submission_file, index=False)
-    
-    print(f"\nSubmission saved to: {submission_file}")
-    print(f"Expected RMSE improvement: 15-20% over baseline (target: 0.58)")
-    
-    return submission, mean_score
+    return submission
 
 if __name__ == "__main__":
-    print("Spatio-Temporal Transformer for NFL Player Movement Prediction")
-    print("Integrated pipeline with advanced feature engineering")
-    print("="*60)
-    
-    submission, score = main()
-    print(f"\nTransformer pipeline completed with CV score: {score:.5f}")
+    main()

@@ -1,0 +1,139 @@
+from collections import defaultdict
+
+def _compute_interactions_for_play_frames(df_play_frames: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute interaction features per (game_id, play_id, frame_id, nfl_id) for selected players:
+      - distance_to_player_mean/min/max_offense/defense
+      - relative_velocity_magnitude_mean/min/max_offense/defense
+      - angle_to_player_mean/min/max_offense/defense  (mean is circular)
+      - nearest_opponent_dist/angle/rel_speed
+
+    Only computes (emits rows) where 'player_to_predict' is True if that column exists.
+    Otherwise computes for all players.
+
+    df_play_frames contains rows for a single (game_id, play_id), multiple frame_ids and all players in those frames.
+    """
+    out_rows = []
+    # Per frame to keep matrices tiny
+    for (g, p, f), grp in df_play_frames.groupby(['game_id', 'play_id', 'frame_id'], sort=False):
+        n = len(grp)
+        if n == 0:
+            continue
+
+        nfl_ids = grp['nfl_id'].to_numpy()
+        x  = grp['x'].to_numpy(dtype=np.float32)
+        y  = grp['y'].to_numpy(dtype=np.float32)
+        vx = grp['velocity_x'].to_numpy(dtype=np.float32)
+        vy = grp['velocity_y'].to_numpy(dtype=np.float32)
+        is_off = grp['is_offense'].to_numpy().astype(bool)
+
+        compute_mask = grp['player_to_predict'].to_numpy().astype(bool) if 'player_to_predict' in grp.columns else np.ones(n, dtype=bool)
+
+        # Pairwise geometry
+        dx = x[None, :] - x[:, None]
+        dy = y[None, :] - y[:, None]
+        dist = np.sqrt(dx * dx + dy * dy)                  # (n,n)
+        angle_mat = np.arctan2(-dy, -dx)                   # angle i->j (y_j - y_i, x_j - x_i)
+        dvx = vx[:, None] - vx[None, :]
+        dvy = vy[:, None] - vy[None, :]
+        rel_speed = np.sqrt(dvx * dvx + dvy * dvy)         # (n,n)
+
+        # Masks
+        opp_mask = (is_off[:, None] != is_off[None, :])    # opponent pairs
+        np.fill_diagonal(opp_mask, False)
+
+        mask_off = np.broadcast_to(is_off[None, :], (n, n)).copy()
+        mask_def = np.broadcast_to(~is_off[None, :], (n, n)).copy()
+        np.fill_diagonal(mask_off, False)
+        np.fill_diagonal(mask_def, False)
+
+        # Nearest opponent
+        dist_opp = np.where(opp_mask, dist, np.nan)
+        nearest_dist = np.nanmin(dist_opp, axis=1)
+        nearest_idx = np.nanargmin(dist_opp, axis=1)
+        all_nan = ~np.isfinite(nearest_dist)
+        nearest_idx_safe = nearest_idx.copy()
+        nearest_idx_safe[all_nan] = 0
+        nearest_angle = np.take_along_axis(angle_mat, nearest_idx_safe[:, None], axis=1).squeeze(1)
+        nearest_rel   = np.take_along_axis(rel_speed, nearest_idx_safe[:, None], axis=1).squeeze(1)
+        nearest_angle[all_nan] = np.nan
+        nearest_rel[all_nan]   = np.nan
+
+        # Group-wise aggregations
+        # Distances
+        d_off = np.where(mask_off, dist, np.nan)
+        d_def = np.where(mask_def, dist, np.nan)
+        d_mean_o = np.nanmean(d_off, axis=1); d_min_o = np.nanmin(d_off, axis=1); d_max_o = np.nanmax(d_off, axis=1)
+        d_mean_d = np.nanmean(d_def, axis=1); d_min_d = np.nanmin(d_def, axis=1); d_max_d = np.nanmax(d_def, axis=1)
+
+        # Relative speed
+        v_off = np.where(mask_off, rel_speed, np.nan)
+        v_def = np.where(mask_def, rel_speed, np.nan)
+        v_mean_o = np.nanmean(v_off, axis=1); v_min_o = np.nanmin(v_off, axis=1); v_max_o = np.nanmax(v_off, axis=1)
+        v_mean_d = np.nanmean(v_def, axis=1); v_min_d = np.nanmin(v_def, axis=1); v_max_d = np.nanmax(v_def, axis=1)
+
+        # Angles: circular mean for mean, raw min/max for spread reference
+        sinA = np.sin(angle_mat); cosA = np.cos(angle_mat)
+
+        cnt_off = mask_off.sum(axis=1).astype(np.float32)
+        cnt_def = mask_def.sum(axis=1).astype(np.float32)
+
+        # Avoid divide-by-zero; set denom=nan where no neighbors
+        denom_off = np.where(cnt_off > 0, cnt_off, np.nan)
+        denom_def = np.where(cnt_def > 0, cnt_def, np.nan)
+
+        sin_sum_off = (sinA * mask_off).sum(axis=1)
+        cos_sum_off = (cosA * mask_off).sum(axis=1)
+        sin_sum_def = (sinA * mask_def).sum(axis=1)
+        cos_sum_def = (cosA * mask_def).sum(axis=1)
+
+        a_mean_o = np.arctan2(sin_sum_off / denom_off, cos_sum_off / denom_off)
+        a_mean_d = np.arctan2(sin_sum_def / denom_def, cos_sum_def / denom_def)
+
+        a_off = np.where(mask_off, angle_mat, np.nan)
+        a_def = np.where(mask_def, angle_mat, np.nan)
+        a_min_o = np.nanmin(a_off, axis=1); a_max_o = np.nanmax(a_off, axis=1)
+        a_min_d = np.nanmin(a_def, axis=1); a_max_d = np.nanmax(a_def, axis=1)
+
+        # Emit only for players to predict
+        for idx, nid in enumerate(nfl_ids):
+            if not compute_mask[idx]:
+                continue
+            out_rows.append({
+                'game_id': g, 'play_id': p, 'frame_id': f, 'nfl_id': int(nid),
+
+                'distance_to_player_mean_offense': d_mean_o[idx],
+                'distance_to_player_min_offense': d_min_o[idx],
+                'distance_to_player_max_offense': d_max_o[idx],
+                'relative_velocity_magnitude_mean_offense': v_mean_o[idx],
+                'relative_velocity_magnitude_min_offense': v_min_o[idx],
+                'relative_velocity_magnitude_max_offense': v_max_o[idx],
+                'angle_to_player_mean_offense': a_mean_o[idx],
+                'angle_to_player_min_offense': a_min_o[idx],
+                'angle_to_player_max_offense': a_max_o[idx],
+
+                'distance_to_player_mean_defense': d_mean_d[idx],
+                'distance_to_player_min_defense': d_min_d[idx],
+                'distance_to_player_max_defense': d_max_d[idx],
+                'relative_velocity_magnitude_mean_defense': v_mean_d[idx],
+                'relative_velocity_magnitude_min_defense': v_min_d[idx],
+                'relative_velocity_magnitude_max_defense': v_max_d[idx],
+                'angle_to_player_mean_defense': a_mean_d[idx],
+                'angle_to_player_min_defense': a_min_d[idx],
+                'angle_to_player_max_defense': a_max_d[idx],
+
+                'nearest_opponent_dist': float(nearest_dist[idx]) if np.isfinite(nearest_dist[idx]) else np.nan,
+                'nearest_opponent_angle': float(nearest_angle[idx]) if np.isfinite(nearest_angle[idx]) else np.nan,
+                'nearest_opponent_rel_speed': float(nearest_rel[idx]) if np.isfinite(nearest_rel[idx]) else np.nan,
+            })
+
+    return pd.DataFrame(out_rows, columns=[
+        'game_id', 'play_id', 'frame_id', 'nfl_id',
+        'distance_to_player_mean_offense', 'distance_to_player_min_offense', 'distance_to_player_max_offense',
+        'relative_velocity_magnitude_mean_offense', 'relative_velocity_magnitude_min_offense', 'relative_velocity_magnitude_max_offense',
+        'angle_to_player_mean_offense', 'angle_to_player_min_offense', 'angle_to_player_max_offense',
+        'distance_to_player_mean_defense', 'distance_to_player_min_defense', 'distance_to_player_max_defense',
+        'relative_velocity_magnitude_mean_defense', 'relative_velocity_magnitude_min_defense', 'relative_velocity_magnitude_max_defense',
+        'angle_to_player_mean_defense', 'angle_to_player_min_defense', 'angle_to_player_max_defense',
+        'nearest_opponent_dist', 'nearest_opponent_angle', 'nearest_opponent_rel_speed'
+    ])
