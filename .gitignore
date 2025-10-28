@@ -11,3 +11,5 @@ __pycache__/
 
 # Ignore cache directories but allow pkl files (handled by LFS)
 *.npy
+
+nfl-big-data-bowl-2026-prediction

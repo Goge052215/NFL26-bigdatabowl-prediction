@@ -2,24 +2,44 @@ import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
+import polars as pl
 from pathlib import Path
 from tqdm.auto import tqdm
 from datetime import datetime
 import warnings
 import os
+import pickle
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GroupKFold
 from torch.utils.data import TensorDataset, DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+# Conditional import for Kaggle evaluation
+try:
+    import kaggle_evaluation.nfl_inference_server
+    KAGGLE_EVAL_AVAILABLE = True
+except ImportError:
+    KAGGLE_EVAL_AVAILABLE = False
+    print("Warning: kaggle_evaluation not available. Running in local mode.")
+
 warnings.filterwarnings('ignore')
 
 # Configs
 class Config:
-    DATA_DIR = Path("/kaggle/input/nfl-big-data-bowl-2026-prediction")
+    # Support both local and Kaggle environments
+    if os.path.exists("/kaggle/input/nfl-big-data-bowl-2026-prediction"):
+        DATA_DIR = Path("/kaggle/input/nfl-big-data-bowl-2026-prediction")
+    elif os.path.exists("nfl-big-data-bowl-2026-prediction"):
+        DATA_DIR = Path("nfl-big-data-bowl-2026-prediction")
+    else:
+        DATA_DIR = Path("data")
+    
     OUTPUT_DIR = Path("working")
     OUTPUT_DIR.mkdir(exist_ok=True)
+    
+    MODEL_DIR = Path("models")
+    MODEL_DIR.mkdir(exist_ok=True)
     
     SEED = 42
     N_FOLDS = 5
@@ -27,11 +47,11 @@ class Config:
     BATCH_SIZE = 256
     EPOCHS = 1000
     PATIENCE = 100
-    LEARNING_RATE = 2e-4
+    LEARNING_RATE = 4e-4
     
     WINDOW_SIZE = 8
     HIDDEN_DIM = 256
-    MAX_FUTURE_HORIZON = 120
+    MAX_FUTURE_HORIZON = 124  # Test this first
     
     FIELD_X_MIN, FIELD_X_MAX = 0.0, 120.0
     FIELD_Y_MIN, FIELD_Y_MAX = 0.0, 53.3
@@ -41,7 +61,10 @@ class Config:
     RADIUS = 15.0
     TAU = 6.0
     
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    DEVICE = torch.device(
+        "mps" if torch.backends.mps.is_available() 
+        else "cpu"
+    )
 
 def set_seed(seed=Config.SEED):
     import random
@@ -236,6 +259,47 @@ def add_advanced_features(df):
     df['normalized_time'] = df.groupby(gcols)['frames_elapsed'].transform(
         lambda x: x / (x.max() + 1)
     )
+    
+    # GROUP 9: Jerk Features (3) - NEW from nn-gru2.py
+    if 'a' in df.columns:
+        df['jerk'] = df.groupby(gcols)['a'].diff().fillna(0) * 10.0  # FPS=10
+    if 'acceleration_x' in df.columns and 'acceleration_y' in df.columns:
+        df['jerk_x'] = df.groupby(gcols)['acceleration_x'].diff().fillna(0) * 10.0
+        df['jerk_y'] = df.groupby(gcols)['acceleration_y'].diff().fillna(0) * 10.0
+    
+    # GROUP 10: Curvature Land Features (8) - NEW from nn-gru2.py
+    if 'ball_land_x' in df.columns and 'ball_land_y' in df.columns:
+        # Signed bearing to ball landing position
+        dx = df['ball_land_x'] - df['x']
+        dy = df['ball_land_y'] - df['y']
+        bearing = np.arctan2(dy, dx)
+        dir_rad = np.deg2rad(df['dir'].fillna(0))
+        df['bearing_to_land_signed'] = np.rad2deg(np.arctan2(
+            np.sin(bearing - dir_rad), np.cos(bearing - dir_rad)
+        ))
+        
+        # Lateral offset from trajectory to landing point
+        ux, uy = np.cos(dir_rad), np.sin(dir_rad)
+        df['land_lateral_offset'] = dy * ux - dx * uy
+        
+        # Trajectory curvature analysis
+        ddir = df.groupby(gcols)['dir'].diff().fillna(0)
+        ddir = np.where(np.abs(ddir) > 180, ddir - 360 * np.sign(ddir), ddir)
+        curvature = np.deg2rad(ddir) / (df['s'].replace(0, np.nan) * 0.1 + 1e-6)
+        df['curvature_signed'] = curvature.fillna(0)
+        df['curvature_abs'] = np.abs(df['curvature_signed'])
+        
+        # Rolling curvature averages
+        for window in [3, 5]:
+            df[f'curvature_roll{window}'] = df.groupby(gcols)['curvature_signed'].transform(
+                lambda x: x.rolling(window, min_periods=1).mean()
+            )
+    
+    # GROUP 11: Enhanced Lag Features (12) - Extend existing lags 1-3
+    for lag in [1, 2, 3]:
+        for col in ['x', 'y', 'velocity_x', 'velocity_y']:
+            if col in df.columns:
+                df[f'{col}_lag{lag}'] = df.groupby(gcols)[col].shift(lag).fillna(0)
     
     print(f"Total features after enhancement: {len(df.columns)}")
     
@@ -689,11 +753,12 @@ class TemporalHuber(nn.Module):
 class SeqModel(nn.Module):
     def __init__(self, input_dim, horizon):
         super().__init__()
-        self.cnn = nn.Conv1d(
-            in_channels=input_dim, 
-            out_channels=64, 
-            kernel_size=3, 
-            padding=1
+        self.cnn = nn.Sequential(
+            nn.Conv1d(input_dim, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(128, 256, kernel_size=3, padding=1)
         )
         self.gru = nn.GRU(
             input_dim, 128, 
