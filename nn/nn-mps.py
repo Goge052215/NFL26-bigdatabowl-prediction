@@ -17,11 +17,11 @@ warnings.filterwarnings('ignore')
 
 # Configs
 class Config:
-    DATA_DIR = Path("data")
-    OUTPUT_DIR = Path("working")
+    DATA_DIR = Path("/Users/goge/nfl26/data")
+    OUTPUT_DIR = Path("/Users/goge/nfl26/nn/outputs")
     OUTPUT_DIR.mkdir(exist_ok=True)
     # Where to persist trained artifacts (models, scalers, route objects)
-    MODEL_DIR = Path("nn/models")
+    MODEL_DIR = Path("/Users/goge/nfl26/nn/models")
     MODEL_DIR.mkdir(exist_ok=True)
     # Toggle saving/loading of artifacts
     SAVE_ARTIFACTS = True
@@ -63,33 +63,22 @@ def set_seed(seed=Config.SEED):
 
 set_seed(Config.SEED)
 
-# ============================================================================
-# GEOMETRIC BASELINE - THE BREAKTHROUGH
-# ============================================================================
+# Geometric baseline
 
 def compute_geometric_endpoint(df):
     """
-    GEOMETRIC ENDPOINT COMPUTATION: Physics-based trajectory prediction
-    ===================================================================
+    Compute geometry-based endpoint positions for each player.
     
-    This function computes where each player should end up based on game context and physics.
-    It's the core innovation that provides deterministic baseline predictions.
+    Summary:
+    - Momentum projection for all players.
+    - Targeted receivers converge to ball landing position.
+    - Defensive coverage mirrors targeted receivers using maintained spatial offset.
+    - Positions clipped to field boundaries.
     
-    ALGORITHM:
-    1. Initialize with momentum-based projection (default behavior for all players)
-    2. Apply game-context rules:
-       - Targeted receivers → converge to ball landing position
-       - Defensive coverage → mirror receivers with maintained spatial offset
-       - All others → continue with momentum-based projection
-    3. Apply field boundary constraints (0-120 yards x, 0-53.3 yards y)
-    
-    PHYSICS MODEL:
-    - Uses current velocity to project natural movement over time horizon
-    - Time horizon based on remaining frames in play (or default 3.0 seconds)
-    - Applies realistic field boundary clipping
-    
-    INPUT: DataFrame with player tracking data including ball landing coordinates
-    OUTPUT: DataFrame with added geo_endpoint_x, geo_endpoint_y, and time_to_endpoint columns
+    Args:
+        df: DataFrame with tracking data and optional ball landing coordinates.
+    Returns:
+        DataFrame with geo_endpoint_x/y and time_to_endpoint columns.
     """
     df = df.copy()
     
@@ -113,17 +102,22 @@ def compute_geometric_endpoint(df):
         
         # Rule 2: Defenders mirror receivers (maintain offset)
         defender_mask = df['player_role'] == 'Defensive Coverage'
-        has_mirror = df.get('mirror_offset_x', 0).notna() & (df.get('mirror_wr_dist', 50) < 15)
-        coverage_mask = defender_mask & has_mirror
         
-        df.loc[coverage_mask, 'geo_endpoint_x'] = (
-            df.loc[coverage_mask, 'ball_land_x'] +
-            df.loc[coverage_mask, 'mirror_offset_x'].fillna(0)
-        )
-        df.loc[coverage_mask, 'geo_endpoint_y'] = (
-            df.loc[coverage_mask, 'ball_land_y'] +
-            df.loc[coverage_mask, 'mirror_offset_y'].fillna(0)
-        )
+        # Check if mirror columns exist and have valid values
+        if 'mirror_offset_x' in df.columns and 'mirror_offset_y' in df.columns and 'mirror_wr_dist' in df.columns:
+            has_mirror_x = df['mirror_offset_x'].notna()
+            has_mirror_dist = df['mirror_wr_dist'] < 15
+            has_mirror = has_mirror_x & has_mirror_dist
+            coverage_mask = defender_mask & has_mirror
+            
+            df.loc[coverage_mask, 'geo_endpoint_x'] = (
+                df.loc[coverage_mask, 'ball_land_x'] +
+                df.loc[coverage_mask, 'mirror_offset_x'].fillna(0)
+            )
+            df.loc[coverage_mask, 'geo_endpoint_y'] = (
+                df.loc[coverage_mask, 'ball_land_y'] +
+                df.loc[coverage_mask, 'mirror_offset_y'].fillna(0)
+            )
     
     # Clip to field
     df['geo_endpoint_x'] = df['geo_endpoint_x'].clip(Config.FIELD_X_MIN, Config.FIELD_X_MAX)
@@ -327,25 +321,8 @@ def add_advanced_features(df):
     df = df.sort_values(['game_id', 'play_id', 'nfl_id', 'frame_id'])
     gcols = ['game_id', 'play_id', 'nfl_id']  # Grouping columns for temporal operations
     
-    # ========================================================================
-    # GROUP 0: GEOMETRIC BASELINE FEATURES (BREAKTHROUGH INNOVATION)
-    # ========================================================================
-    """
-    GEOMETRIC PROCESSING: Physics-based trajectory prediction
-    
-    This is the key innovation that provides deterministic baseline predictions:
-    - Computes where each player SHOULD end up based on game context
-    - Targeted receivers → converge to ball landing position
-    - Defenders → mirror receiver movements with spatial offset
-    - Other players → continue with current momentum
-    
-    Features generated: ~15 geometric features including:
-    - geo_endpoint_x/y: Predicted final positions
-    - geo_required_vx/vy: Velocities needed to reach endpoints
-    - geo_velocity_error: Deviation from required velocity
-    - geo_alignment: How well current movement aligns with geometric path
-    """
-    print("  → Applying geometric baseline features...")
+    # Group 0: Geometric baseline features
+    print("Applying geometric baseline features...")
     df = add_geometric_features(df)
     
     # ========================================================================
@@ -432,17 +409,7 @@ def add_advanced_features(df):
             if col in df.columns:
                 df[f'{col}_lag{lag}'] = df.groupby(gcols)[col].shift(lag).fillna(0)
     
-    # ========================================================================
-    # GROUP 5: VELOCITY CHANGE FEATURES (4 features)
-    # ========================================================================
-    """
-    ACCELERATION PATTERNS: First derivatives of kinematic variables
-    
-    Captures instantaneous changes in movement:
-    - velocity_x/y_change: Linear acceleration components
-    - speed_change: Change in overall speed
-    - direction_change: Angular acceleration (with 360° wrap-around handling)
-    """
+    # Group 5: Velocity change features
     if 'velocity_x' in df.columns:
         df['velocity_x_change'] = df.groupby(gcols)['velocity_x'].diff().fillna(0)
         df['velocity_y_change'] = df.groupby(gcols)['velocity_y'].diff().fillna(0)
@@ -453,19 +420,7 @@ def add_advanced_features(df):
             lambda x: x if abs(x) < 180 else x - 360 * np.sign(x)
         )
     
-    # ========================================================================
-    # GROUP 6: FIELD POSITION FEATURES (4 features)
-    # ========================================================================
-    """
-    SPATIAL CONTEXT: Field boundaries and strategic positioning
-    
-    Captures player position relative to field constraints:
-    - dist_from_left/right: Distance from sidelines (0-53.3 yards)
-    - dist_from_sideline: Minimum distance to nearest sideline
-    - dist_from_endzone: Distance from nearest endzone (0-120 yards)
-    
-    Purpose: Encode field constraints that influence player movement patterns
-    """
+    # Group 6: Field position features
     df['dist_from_left'] = df['y']
     df['dist_from_right'] = 53.3 - df['y']
     df['dist_from_sideline'] = np.minimum(df['dist_from_left'], df['dist_from_right'])

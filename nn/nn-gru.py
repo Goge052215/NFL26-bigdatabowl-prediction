@@ -2,71 +2,69 @@ import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
-import polars as pl
 from pathlib import Path
 from tqdm.auto import tqdm
-from datetime import datetime
 import warnings
 import os
 import pickle
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GroupKFold
-from torch.utils.data import TensorDataset, DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR
-
-# Conditional import for Kaggle evaluation
-try:
-    import kaggle_evaluation.nfl_inference_server
-    KAGGLE_EVAL_AVAILABLE = True
-except ImportError:
-    KAGGLE_EVAL_AVAILABLE = False
-    print("Warning: kaggle_evaluation not available. Running in local mode.")
+from sklearn.cluster import KMeans
+from multiprocessing import Pool as MultiprocessingPool, cpu_count
 
 warnings.filterwarnings('ignore')
 
-# Configs
-class Config:
-    # Support both local and Kaggle environments
-    if os.path.exists("/kaggle/input/nfl-big-data-bowl-2026-prediction"):
-        DATA_DIR = Path("/kaggle/input/nfl-big-data-bowl-2026-prediction")
-    elif os.path.exists("nfl-big-data-bowl-2026-prediction"):
-        DATA_DIR = Path("nfl-big-data-bowl-2026-prediction")
-    else:
-        DATA_DIR = Path("data")
-    
-    OUTPUT_DIR = Path("working")
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    
-    MODEL_DIR = Path("models")
-    MODEL_DIR.mkdir(exist_ok=True)
-    
-    SEED = 42
-    N_FOLDS = 5
+# ============================================================================
+# CONFIG
+# ============================================================================
 
+class Config:
+    DATA_DIR = Path("/kaggle/input/nfl-big-data-bowl-2026-prediction/")
+    OUTPUT_DIR = Path("./outputs")
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    # Where to persist trained artifacts (models, scalers, route objects)
+    MODEL_DIR = OUTPUT_DIR / "models"
+    MODEL_DIR.mkdir(exist_ok=True)
+    # Toggle saving/loading of artifacts
+    SAVE_ARTIFACTS = True
+    LOAD_ARTIFACTS = True
+    LOAD_DIR = '/kaggle/input/nfl-bdb-2026/nfl-gnn-a43/outputs/models'
+  
+    SEED = 42
+    N_FOLDS = 10
     BATCH_SIZE = 256
-    EPOCHS = 1000
-    PATIENCE = 100
-    LEARNING_RATE = 4e-4
+    EPOCHS = 210
+    PATIENCE = 30
+    LEARNING_RATE = 1e-3
     
-    WINDOW_SIZE = 8
-    HIDDEN_DIM = 256
-    MAX_FUTURE_HORIZON = 124  # Test this first
+    WINDOW_SIZE = 10
+    HIDDEN_DIM = 128
+    MAX_FUTURE_HORIZON = 94
+    
+    # === Transformer 超参数 ===
+    N_HEADS = 4  # Transformer 的注意力头数
+    N_LAYERS = 2 # Transformer 编码器的层数
+    
+    # === 新增：ResidualMLP Head 超参数 ===
+    MLP_HIDDEN_DIM = 256 # MLP 头的内部隐藏维度
+    N_RES_BLOCKS = 2     # 残差块的数量
+    # ==================================
     
     FIELD_X_MIN, FIELD_X_MAX = 0.0, 120.0
     FIELD_Y_MIN, FIELD_Y_MAX = 0.0, 53.3
     
-    # GNN-lite parameters
-    K_NEIGH = 5
-    RADIUS = 15.0
-    TAU = 6.0
+    K_NEIGH = 6
+    RADIUS = 30.0
+    TAU = 8.0
+    N_ROUTE_CLUSTERS = 7
     
-    DEVICE = torch.device(
-        "mps" if torch.backends.mps.is_available() 
-        else "cpu"
-    )
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    DEBUG = False
+    if DEBUG:
+        N_FOLDS = 2
 
-def set_seed(seed=Config.SEED):
+def set_seed(seed=42):
     import random
     random.seed(seed)
     np.random.seed(seed)
@@ -76,7 +74,169 @@ def set_seed(seed=Config.SEED):
 
 set_seed(Config.SEED)
 
-# feature engineering
+# ============================================================================
+# 🔄 PLAY DIRECTION NORMALIZATION (右基準に統一)
+# ============================================================================
+
+def unify_play_direction(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    プレイヤー方向の統一:
+      - 右方向基準に正規化
+      - 右なら (x, y) そのまま
+      - 左なら (x, y) -> (120 - x, 53.3 - y)
+      - 角度 (o, dir) も +180 度（mod 360）
+      - 最後に play_direction / playDirection を削除
+    """
+    if df is None or len(df) == 0:
+        return df
+
+    df = df.copy()
+    XMAX = Config.FIELD_X_MAX
+    YMAX = Config.FIELD_Y_MAX
+
+    # 検出: 列名のバリエーションに対応
+    dir_col = None
+    for cand in ['play_direction', 'playDirection']:
+        if cand in df.columns:
+            dir_col = cand
+            break
+
+    if dir_col is None:
+        # 正規化不要（既に統一済み or カラムなし）
+        return df
+
+    # left を True とするマスク（プレイ単位で一定になるはず）
+    is_left_series = df[dir_col].astype(str).str.lower().str.startswith('l')
+    if {'game_id', 'play_id'}.issubset(df.columns):
+        # プレイ単位でブロードキャスト（firstで十分）
+        play_left = (df.groupby(['game_id', 'play_id'])[dir_col]
+                       .transform('first')
+                       .astype(str).str.lower().str.startswith('l'))
+        flip = play_left.fillna(False).values
+    else:
+        flip = is_left_series.fillna(False).values
+
+    # 数値カラムの反転
+    x_cols = [c for c in ['x', 'ball_land_x', 'ball_snap_x', 'ball_x'] if c in df.columns]
+    y_cols = [c for c in ['y', 'ball_land_y', 'ball_snap_y', 'ball_y'] if c in df.columns]
+
+    if any(x_cols):
+        for c in x_cols:
+            df.loc[flip, c] = XMAX - df.loc[flip, c]
+    if any(y_cols):
+        for c in y_cols:
+            df.loc[flip, c] = YMAX - df.loc[flip, c]
+
+    # 角度（o, dir）は 180 度回転
+    for ang_col in ['o', 'dir']:
+        if ang_col in df.columns:
+            df.loc[flip, ang_col] = (df.loc[flip, ang_col] + 180.0) % 360.0
+
+    # play_direction カラムを削除
+    if dir_col in df.columns:
+        df.drop(columns=[dir_col], inplace=True)
+
+    return df
+
+# ============================================================================
+# GEOMETRIC BASELINE - THE BREAKTHROUGH
+# ============================================================================
+
+def compute_geometric_endpoint(df):
+    """
+    Compute where each player SHOULD end up based on geometry.
+    This is the deterministic part - no learning needed.
+    """
+    df = df.copy()
+    
+    # Time to play end
+    if 'num_frames_output' in df.columns:
+        t_total = df['num_frames_output'] / 10.0
+    else:
+        t_total = 3.0
+    
+    df['time_to_endpoint'] = t_total
+    
+    # Initialize with momentum (default rule)
+    df['geo_endpoint_x'] = df['x'] + df['velocity_x'] * t_total
+    df['geo_endpoint_y'] = df['y'] + df['velocity_y'] * t_total
+    
+    # Rule 1: Targeted Receivers converge to ball
+    if 'ball_land_x' in df.columns:
+        receiver_mask = df['player_role'] == 'Targeted Receiver'
+        df.loc[receiver_mask, 'geo_endpoint_x'] = df.loc[receiver_mask, 'ball_land_x']
+        df.loc[receiver_mask, 'geo_endpoint_y'] = df.loc[receiver_mask, 'ball_land_y']
+        
+        # Rule 2: Defenders mirror receivers (maintain offset)
+        defender_mask = df['player_role'] == 'Defensive Coverage'
+        has_mirror = df.get('mirror_offset_x', 0).notna() & (df.get('mirror_wr_dist', 50) < 15)
+        coverage_mask = defender_mask & has_mirror
+        
+        df.loc[coverage_mask, 'geo_endpoint_x'] = (
+            df.loc[coverage_mask, 'ball_land_x'] + 
+            df.loc[coverage_mask, 'mirror_offset_x'].fillna(0)
+        )
+        df.loc[coverage_mask, 'geo_endpoint_y'] = (
+            df.loc[coverage_mask, 'ball_land_y'] + 
+            df.loc[coverage_mask, 'mirror_offset_y'].fillna(0)
+        )
+    
+    # Clip to field
+    df['geo_endpoint_x'] = df['geo_endpoint_x'].clip(Config.FIELD_X_MIN, Config.FIELD_X_MAX)
+    df['geo_endpoint_y'] = df['geo_endpoint_y'].clip(Config.FIELD_Y_MIN, Config.FIELD_Y_MAX)
+    
+    return df
+
+def add_geometric_features(df):
+    """Add features that describe the geometric solution"""
+    df = compute_geometric_endpoint(df)
+    
+    # Vector to geometric endpoint
+    df['geo_vector_x'] = df['geo_endpoint_x'] - df['x']
+    df['geo_vector_y'] = df['geo_endpoint_y'] - df['y']
+    df['geo_distance'] = np.sqrt(df['geo_vector_x']**2 + df['geo_vector_y']**2)
+    
+    # Required velocity to reach geometric endpoint
+    t = df['time_to_endpoint'] + 0.1
+    df['geo_required_vx'] = df['geo_vector_x'] / t
+    df['geo_required_vy'] = df['geo_vector_y'] / t
+    
+    # Current velocity vs required
+    df['geo_velocity_error_x'] = df['geo_required_vx'] - df['velocity_x']
+    df['geo_velocity_error_y'] = df['geo_required_vy'] - df['velocity_y']
+    df['geo_velocity_error'] = np.sqrt(
+        df['geo_velocity_error_x']**2 + df['geo_velocity_error_y']**2
+    )
+    
+    # Required constant acceleration (a = 2*Δx/t²)
+    t_sq = t * t
+    df['geo_required_ax'] = 2 * df['geo_vector_x'] / t_sq
+    df['geo_required_ay'] = 2 * df['geo_vector_y'] / t_sq
+    df['geo_required_ax'] = df['geo_required_ax'].clip(-10, 10)
+    df['geo_required_ay'] = df['geo_required_ay'].clip(-10, 10)
+    
+    # Alignment with geometric path
+    velocity_mag = np.sqrt(df['velocity_x']**2 + df['velocity_y']**2)
+    geo_unit_x = df['geo_vector_x'] / (df['geo_distance'] + 0.1)
+    geo_unit_y = df['geo_vector_y'] / (df['geo_distance'] + 0.1)
+    df['geo_alignment'] = (
+        df['velocity_x'] * geo_unit_x + df['velocity_y'] * geo_unit_y
+    ) / (velocity_mag + 0.1)
+    
+    # Role-specific geometric quality
+    df['geo_receiver_urgency'] = df['is_receiver'] * df['geo_distance'] / (t + 0.1)
+    df['geo_defender_coupling'] = df['is_coverage'] * (1.0 / (df.get('mirror_wr_dist', 50) + 1.0))
+    
+    return df
+
+# ============================================================================
+# PROVEN FEATURE ENGINEERING (YOUR 0.59 BASE)
+# ============================================================================
+
+def get_velocity(speed, direction_deg):
+    theta = np.deg2rad(direction_deg)
+    return speed * np.sin(theta), speed * np.cos(theta)
+
 def height_to_feet(height_str):
     try:
         ft, inches = map(int, str(height_str).split('-'))
@@ -84,284 +244,372 @@ def height_to_feet(height_str):
     except:
         return 6.0
 
-# GNN-lite neighbor embedding computations
-class GNNLiteProcessor:
-    def compute_neighbor_embeddings(self, input_df: pd.DataFrame) -> pd.DataFrame:
-        cols_needed = ["game_id","play_id","nfl_id","frame_id","x","y",
-                       "velocity_x","velocity_y","player_side"]
-        src = input_df[cols_needed].copy()
-
-        last = (src.sort_values(["game_id","play_id","nfl_id","frame_id"])
-                   .groupby(["game_id","play_id","nfl_id"], as_index=False)
-                   .tail(1)
-                   .rename(columns={"frame_id":"last_frame_id"})
-                   .reset_index(drop=True))
-
-        # join neighbors at the ego's last_frame_id
-        tmp = last.merge(
-            src.rename(columns={
-                "frame_id":"nb_frame_id", "nfl_id":"nfl_id_nb",
-                "x":"x_nb", "y":"y_nb",
-                "velocity_x":"vx_nb", "velocity_y":"vy_nb",
-                "player_side":"player_side_nb"
-            }),
-            left_on=["game_id","play_id","last_frame_id"],
-            right_on=["game_id","play_id","nb_frame_id"],
-            how="left",
-        )
-
-        # drop self
-        tmp = tmp[tmp["nfl_id_nb"] != tmp["nfl_id"]]
-
-        # relative vectors
-        tmp["dx"]  = tmp["x_nb"] - tmp["x"]
-        tmp["dy"]  = tmp["y_nb"] - tmp["y"]
-        tmp["dvx"] = tmp["vx_nb"] - tmp["velocity_x"]
-        tmp["dvy"] = tmp["vy_nb"] - tmp["velocity_y"]
-        tmp["dist"] = np.sqrt(tmp["dx"]**2 + tmp["dy"]**2)
-
-        tmp = tmp[np.isfinite(tmp["dist"])]
-        tmp = tmp[tmp["dist"] > 1e-6]
-        if Config.RADIUS is not None:
-            tmp = tmp[tmp["dist"] <= Config.RADIUS]
-
-        # ally / opp flag
-        tmp["is_ally"] = (tmp["player_side_nb"].fillna("") == tmp["player_side"].fillna("")).astype(np.float32)
-
-        # rank by distance (keep top-K)
-        keys = ["game_id","play_id","nfl_id"]
-        tmp["rnk"] = tmp.groupby(keys)["dist"].rank(method="first")
-        if Config.K_NEIGH is not None:
-            tmp = tmp[tmp["rnk"] <= float(Config.K_NEIGH)]
-
-        # attention weights: softmax(-dist/tau) within group
-        tmp["w"] = np.exp(-tmp["dist"] / float(Config.TAU))
-        sum_w = tmp.groupby(keys)["w"].transform("sum")
-        tmp["wn"] = np.where(sum_w > 0, tmp["w"]/sum_w, 0.0)
-
-        tmp["wn_ally"] = tmp["wn"] * tmp["is_ally"]
-        tmp["wn_opp"]  = tmp["wn"] * (1.0 - tmp["is_ally"])
-
-        # pre-multiply for group sums
-        for col in ["dx","dy","dvx","dvy"]:
-            tmp[f"{col}_ally_w"] = tmp[col] * tmp["wn_ally"]
-            tmp[f"{col}_opp_w"]  = tmp[col] * tmp["wn_opp"]
-
-        tmp["dist_ally"] = np.where(tmp["is_ally"] > 0.5, tmp["dist"], np.nan)
-        tmp["dist_opp"]  = np.where(tmp["is_ally"] < 0.5, tmp["dist"], np.nan)
-
-        ag = tmp.groupby(keys).agg(
-            gnn_ally_dx_mean = ("dx_ally_w", "sum"),
-            gnn_ally_dy_mean = ("dy_ally_w", "sum"),
-            gnn_ally_dvx_mean= ("dvx_ally_w","sum"),
-            gnn_ally_dvy_mean= ("dvy_ally_w","sum"),
-            gnn_opp_dx_mean  = ("dx_opp_w",  "sum"),
-            gnn_opp_dy_mean  = ("dy_opp_w",  "sum"),
-            gnn_opp_dvx_mean = ("dvx_opp_w", "sum"),
-            gnn_opp_dvy_mean = ("dvy_opp_w", "sum"),
-            gnn_ally_cnt     = ("is_ally",   "sum"),
-            gnn_opp_cnt      = ("is_ally",   lambda s: float(len(s) - s.sum())),
-            gnn_ally_dmin    = ("dist_ally", "min"),
-            gnn_ally_dmean   = ("dist_ally", "mean"),
-            gnn_opp_dmin     = ("dist_opp",  "min"),
-            gnn_opp_dmean    = ("dist_opp",  "mean"),
-        ).reset_index()
-
-        # d1..d3 nearest (regardless of side)
-        near = tmp.loc[tmp["rnk"]<=3, keys+["rnk","dist"]].copy()
-        near["rnk"] = near["rnk"].astype(int)
-        dwide = near.pivot_table(index=keys, columns="rnk", values="dist", aggfunc="first")
-        dwide = dwide.rename(columns={1:"gnn_d1",2:"gnn_d2",3:"gnn_d3"}).reset_index()
-        ag = ag.merge(dwide, on=keys, how="left")
-
-        # safe fills
-        for c in ["gnn_ally_dx_mean","gnn_ally_dy_mean","gnn_ally_dvx_mean","gnn_ally_dvy_mean",
-                  "gnn_opp_dx_mean","gnn_opp_dy_mean","gnn_opp_dvx_mean","gnn_opp_dvy_mean"]:
-            ag[c] = ag[c].fillna(0.0)
-        for c in ["gnn_ally_cnt","gnn_opp_cnt"]:
-            ag[c] = ag[c].fillna(0.0)
-        for c in ["gnn_ally_dmin","gnn_opp_dmin","gnn_ally_dmean","gnn_opp_dmean","gnn_d1","gnn_d2","gnn_d3"]:
-            ag[c] = ag[c].fillna(Config.RADIUS if Config.RADIUS is not None else 30.0)
-
-        return ag
-
-def add_advanced_features(df):
-    df = df.copy()
-    df = df.sort_values(['game_id', 'play_id', 'nfl_id', 'frame_id'])
-    gcols = ['game_id', 'play_id', 'nfl_id']
+def get_opponent_features(input_df):
+    """Enhanced opponent interaction with MIRROR WR tracking"""
+    features = []
     
-    # GROUP 1: Distance Rate Features (3)
-    if 'distance_to_ball' in df.columns:
-        df['distance_to_ball_change'] = df.groupby(gcols)['distance_to_ball'].diff().fillna(0)
-        df['distance_to_ball_accel'] = df.groupby(gcols)['distance_to_ball_change'].diff().fillna(0)
-        df['time_to_intercept'] = (
-            df['distance_to_ball'] / 
-            (np.abs(df['distance_to_ball_change']) + 0.1)).clip(0, 10)
+    for (gid, pid), group in tqdm(input_df.groupby(['game_id', 'play_id']), 
+                                   desc="🏈 Opponents", leave=False):
+        last = group.sort_values('frame_id').groupby('nfl_id').last()
+        
+        if len(last) < 2:
+            continue
+            
+        positions = last[['x', 'y']].values
+        sides = last['player_side'].values
+        speeds = last['s'].values
+        directions = last['dir'].values
+        roles = last['player_role'].values
+        
+        receiver_mask = np.isin(roles, ['Targeted Receiver', 'Other Route Runner'])
+        
+        for i, (nid, side, role) in enumerate(zip(last.index, sides, roles)):
+            opp_mask = sides != side
+            
+            feat = {
+                'game_id': gid, 'play_id': pid, 'nfl_id': nid,
+                'nearest_opp_dist': 50.0, 'closing_speed': 0.0,
+                'num_nearby_opp_3': 0, 'num_nearby_opp_5': 0,
+                'mirror_wr_vx': 0.0, 'mirror_wr_vy': 0.0,
+                'mirror_offset_x': 0.0, 'mirror_offset_y': 0.0,
+                'mirror_wr_dist': 50.0,
+            }
+            
+            if not opp_mask.any():
+                features.append(feat)
+                continue
+            
+            opp_positions = positions[opp_mask]
+            distances = np.sqrt(((positions[i] - opp_positions)**2).sum(axis=1))
+            
+            if len(distances) == 0:
+                features.append(feat)
+                continue
+                
+            nearest_idx = distances.argmin()
+            feat['nearest_opp_dist'] = distances[nearest_idx]
+            feat['num_nearby_opp_3'] = (distances < 3.0).sum()
+            feat['num_nearby_opp_5'] = (distances < 5.0).sum()
+            
+            my_vx, my_vy = get_velocity(speeds[i], directions[i])
+            opp_speeds = speeds[opp_mask]
+            opp_dirs = directions[opp_mask]
+            opp_vx, opp_vy = get_velocity(opp_speeds[nearest_idx], opp_dirs[nearest_idx])
+            
+            rel_vx = my_vx - opp_vx
+            rel_vy = my_vy - opp_vy
+            to_me = positions[i] - opp_positions[nearest_idx]
+            to_me_norm = to_me / (np.linalg.norm(to_me) + 0.1)
+            feat['closing_speed'] = -(rel_vx * to_me_norm[0] + rel_vy * to_me_norm[1])
+            
+            if role == 'Defensive Coverage' and receiver_mask.any():
+                rec_positions = positions[receiver_mask]
+                rec_distances = np.sqrt(((positions[i] - rec_positions)**2).sum(axis=1))
+                
+                if len(rec_distances) > 0:
+                    closest_rec_idx = rec_distances.argmin()
+                    rec_indices = np.where(receiver_mask)[0]
+                    actual_rec_idx = rec_indices[closest_rec_idx]
+                    
+                    rec_vx, rec_vy = get_velocity(speeds[actual_rec_idx], directions[actual_rec_idx])
+                    
+                    feat['mirror_wr_vx'] = rec_vx
+                    feat['mirror_wr_vy'] = rec_vy
+                    feat['mirror_wr_dist'] = rec_distances[closest_rec_idx]
+                    feat['mirror_offset_x'] = positions[i][0] - rec_positions[closest_rec_idx][0]
+                    feat['mirror_offset_y'] = positions[i][1] - rec_positions[closest_rec_idx][1]
+            
+            features.append(feat)
     
-    # GROUP 2: Target Alignment Features (3)
-    if 'ball_direction_x' in df.columns:
-        df['velocity_alignment'] = (
-            df['velocity_x'] * df['ball_direction_x'] +
-            df['velocity_y'] * df['ball_direction_y']
-        )
-        df['velocity_perpendicular'] = (
-            df['velocity_x'] * (-df['ball_direction_y']) +
-            df['velocity_y'] * df['ball_direction_x']
-        )
-        if 'acceleration_x' in df.columns:
-            df['accel_alignment'] = (
-                df['acceleration_x'] * df['ball_direction_x'] +
-                df['acceleration_y'] * df['ball_direction_y']
-            )
+    return pd.DataFrame(features)
+
+def extract_route_patterns(input_df, kmeans=None, scaler=None, fit=True):
+    """Route clustering"""
+    route_features = []
     
-    # GROUP 3: Multi-Window Rolling (24)
-    for window in [3, 5, 10]:
-        for col in ['velocity_x', 'velocity_y', 's', 'a']:
-            if col in df.columns:
-                df[f'{col}_roll{window}'] = df.groupby(gcols)[col].transform(
-                    lambda x: x.rolling(window, min_periods=1).mean()
-                )
-                df[f'{col}_std{window}'] = df.groupby(gcols)[col].transform(
-                    lambda x: x.rolling(window, min_periods=1).std()
-                ).fillna(0)
+    for (gid, pid, nid), group in tqdm(input_df.groupby(['game_id', 'play_id', 'nfl_id']), 
+                                        desc="🛣️  Routes", leave=False):
+        traj = group.sort_values('frame_id').tail(5)
+        
+        if len(traj) < 3:
+            continue
+        
+        positions = traj[['x', 'y']].values
+        speeds = traj['s'].values
+        
+        total_dist = np.sum(np.sqrt(np.diff(positions[:, 0])**2 + np.diff(positions[:, 1])**2))
+        displacement = np.sqrt((positions[-1, 0] - positions[0, 0])**2 + 
+                              (positions[-1, 1] - positions[0, 1])**2)
+        straightness = displacement / (total_dist + 0.1)
+        
+        angles = np.arctan2(np.diff(positions[:, 1]), np.diff(positions[:, 0]))
+        if len(angles) > 1:
+            angle_changes = np.abs(np.diff(angles))
+            max_turn = np.max(angle_changes)
+            mean_turn = np.mean(angle_changes)
+        else:
+            max_turn = mean_turn = 0
+        
+        speed_mean = speeds.mean()
+        speed_change = speeds[-1] - speeds[0] if len(speeds) > 1 else 0
+        dx = positions[-1, 0] - positions[0, 0]
+        dy = positions[-1, 1] - positions[0, 1]
+        
+        route_features.append({
+            'game_id': gid, 'play_id': pid, 'nfl_id': nid,
+            'traj_straightness': straightness,
+            'traj_max_turn': max_turn,
+            'traj_mean_turn': mean_turn,
+            'traj_depth': abs(dx),
+            'traj_width': abs(dy),
+            'speed_mean': speed_mean,
+            'speed_change': speed_change,
+        })
     
-    # GROUP 4: Extended Lag Features (8)
-    for lag in [4, 5]:
-        for col in ['x', 'y', 'velocity_x', 'velocity_y']:
-            if col in df.columns:
-                df[f'{col}_lag{lag}'] = df.groupby(gcols)[col].shift(lag).fillna(0)
+    route_df = pd.DataFrame(route_features)
+    feat_cols = ['traj_straightness', 'traj_max_turn', 'traj_mean_turn',
+                 'traj_depth', 'traj_width', 'speed_mean', 'speed_change']
+    X = route_df[feat_cols].fillna(0)
     
-    # GROUP 5: Velocity Change Features (4)
-    if 'velocity_x' in df.columns:
-        df['velocity_x_change'] = df.groupby(gcols)['velocity_x'].diff().fillna(0)
-        df['velocity_y_change'] = df.groupby(gcols)['velocity_y'].diff().fillna(0)
-        df['speed_change'] = df.groupby(gcols)['s'].diff().fillna(0)
-        df['direction_change'] = df.groupby(gcols)['dir'].diff().fillna(0)
-        df['direction_change'] = df['direction_change'].apply(
-            lambda x: x if abs(x) < 180 else x - 360 * np.sign(x)
-        )
+    if fit:
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        kmeans = KMeans(n_clusters=Config.N_ROUTE_CLUSTERS, random_state=Config.SEED, n_init=10)
+        route_df['route_pattern'] = kmeans.fit_predict(X_scaled)
+        return route_df, kmeans, scaler
+    else:
+        X_scaled = scaler.transform(X)
+        route_df['route_pattern'] = kmeans.predict(X_scaled)
+        return route_df
+
+def compute_neighbor_embeddings(input_df, k_neigh=Config.K_NEIGH, 
+                                radius=Config.RADIUS, tau=Config.TAU):
+    """GNN-lite embeddings"""
+    print("🕸️  GNN embeddings...")
     
-    # GROUP 6: Field Position Features (4)
-    df['dist_from_left'] = df['y']
-    df['dist_from_right'] = 53.3 - df['y']
-    df['dist_from_sideline'] = np.minimum(df['dist_from_left'], df['dist_from_right'])
-    df['dist_from_endzone'] = np.minimum(df['x'], 120 - df['x'])
+    cols_needed = ["game_id", "play_id", "nfl_id", "frame_id", "x", "y", 
+                   "velocity_x", "velocity_y", "player_side"]
+    src = input_df[cols_needed].copy()
     
-    # GROUP 7: Role-Specific Features (3)
-    if 'is_receiver' in df.columns and 'velocity_alignment' in df.columns:
-        df['receiver_optimality'] = df['is_receiver'] * df['velocity_alignment']
-        df['receiver_deviation'] = df['is_receiver'] * np.abs(df.get('velocity_perpendicular', 0))
-    if 'is_coverage' in df.columns and 'closing_speed' in df.columns:
-        df['defender_closing_speed'] = df['is_coverage'] * df['closing_speed']
+    last = (src.sort_values(["game_id", "play_id", "nfl_id", "frame_id"])
+               .groupby(["game_id", "play_id", "nfl_id"], as_index=False)
+               .tail(1)
+               .rename(columns={"frame_id": "last_frame_id"})
+               .reset_index(drop=True))
     
-    # GROUP 8: Time Features (2)
-    df['frames_elapsed'] = df.groupby(gcols).cumcount()
-    df['normalized_time'] = df.groupby(gcols)['frames_elapsed'].transform(
-        lambda x: x / (x.max() + 1)
+    tmp = last.merge(
+        src.rename(columns={
+            "frame_id": "nb_frame_id", "nfl_id": "nfl_id_nb",
+            "x": "x_nb", "y": "y_nb", 
+            "velocity_x": "vx_nb", "velocity_y": "vy_nb", 
+            "player_side": "player_side_nb"
+        }),
+        left_on=["game_id", "play_id", "last_frame_id"],
+        right_on=["game_id", "play_id", "nb_frame_id"],
+        how="left"
     )
     
-    # GROUP 9: Jerk Features (3) - NEW from nn-gru2.py
-    if 'a' in df.columns:
-        df['jerk'] = df.groupby(gcols)['a'].diff().fillna(0) * 10.0  # FPS=10
-    if 'acceleration_x' in df.columns and 'acceleration_y' in df.columns:
-        df['jerk_x'] = df.groupby(gcols)['acceleration_x'].diff().fillna(0) * 10.0
-        df['jerk_y'] = df.groupby(gcols)['acceleration_y'].diff().fillna(0) * 10.0
+    tmp = tmp[tmp["nfl_id_nb"] != tmp["nfl_id"]]
+    tmp["dx"] = tmp["x_nb"] - tmp["x"]
+    tmp["dy"] = tmp["y_nb"] - tmp["y"]
+    tmp["dvx"] = tmp["vx_nb"] - tmp["velocity_x"]
+    tmp["dvy"] = tmp["vy_nb"] - tmp["velocity_y"]
+    tmp["dist"] = np.sqrt(tmp["dx"]**2 + tmp["dy"]**2)
     
-    # GROUP 10: Curvature Land Features (8) - NEW from nn-gru2.py
-    if 'ball_land_x' in df.columns and 'ball_land_y' in df.columns:
-        # Signed bearing to ball landing position
-        dx = df['ball_land_x'] - df['x']
-        dy = df['ball_land_y'] - df['y']
-        bearing = np.arctan2(dy, dx)
-        dir_rad = np.deg2rad(df['dir'].fillna(0))
-        df['bearing_to_land_signed'] = np.rad2deg(np.arctan2(
-            np.sin(bearing - dir_rad), np.cos(bearing - dir_rad)
-        ))
-        
-        # Lateral offset from trajectory to landing point
-        ux, uy = np.cos(dir_rad), np.sin(dir_rad)
-        df['land_lateral_offset'] = dy * ux - dx * uy
-        
-        # Trajectory curvature analysis
-        ddir = df.groupby(gcols)['dir'].diff().fillna(0)
-        ddir = np.where(np.abs(ddir) > 180, ddir - 360 * np.sign(ddir), ddir)
-        curvature = np.deg2rad(ddir) / (df['s'].replace(0, np.nan) * 0.1 + 1e-6)
-        df['curvature_signed'] = curvature.fillna(0)
-        df['curvature_abs'] = np.abs(df['curvature_signed'])
-        
-        # Rolling curvature averages
-        for window in [3, 5]:
-            df[f'curvature_roll{window}'] = df.groupby(gcols)['curvature_signed'].transform(
-                lambda x: x.rolling(window, min_periods=1).mean()
-            )
+    tmp = tmp[np.isfinite(tmp["dist"]) & (tmp["dist"] > 1e-6)]
+    if radius is not None:
+        tmp = tmp[tmp["dist"] <= radius]
     
-    # GROUP 11: Enhanced Lag Features (12) - Extend existing lags 1-3
-    for lag in [1, 2, 3]:
-        for col in ['x', 'y', 'velocity_x', 'velocity_y']:
-            if col in df.columns:
-                df[f'{col}_lag{lag}'] = df.groupby(gcols)[col].shift(lag).fillna(0)
+    tmp["is_ally"] = (tmp["player_side_nb"] == tmp["player_side"]).astype(np.float32)
     
-    print(f"Total features after enhancement: {len(df.columns)}")
+    keys = ["game_id", "play_id", "nfl_id"]
+    tmp["rnk"] = tmp.groupby(keys)["dist"].rank(method="first")
+    if k_neigh is not None:
+        tmp = tmp[tmp["rnk"] <= float(k_neigh)]
     
-    return df
+    tmp["w"] = np.exp(-tmp["dist"] / float(tau))
+    sum_w = tmp.groupby(keys)["w"].transform("sum")
+    tmp["wn"] = np.where(sum_w > 0, tmp["w"] / sum_w, 0.0)
+    
+    tmp["wn_ally"] = tmp["wn"] * tmp["is_ally"]
+    tmp["wn_opp"] = tmp["wn"] * (1.0 - tmp["is_ally"])
+    
+    for col in ["dx", "dy", "dvx", "dvy"]:
+        tmp[f"{col}_ally_w"] = tmp[col] * tmp["wn_ally"]
+        tmp[f"{col}_opp_w"] = tmp[col] * tmp["wn_opp"]
+    
+    tmp["dist_ally"] = np.where(tmp["is_ally"] > 0.5, tmp["dist"], np.nan)
+    tmp["dist_opp"] = np.where(tmp["is_ally"] < 0.5, tmp["dist"], np.nan)
+    
+    ag = tmp.groupby(keys).agg(
+        gnn_ally_dx_mean=("dx_ally_w", "sum"),
+        gnn_ally_dy_mean=("dy_ally_w", "sum"),
+        gnn_ally_dvx_mean=("dvx_ally_w", "sum"),
+        gnn_ally_dvy_mean=("dvy_ally_w", "sum"),
+        gnn_opp_dx_mean=("dx_opp_w", "sum"),
+        gnn_opp_dy_mean=("dy_opp_w", "sum"),
+        gnn_opp_dvx_mean=("dvx_opp_w", "sum"),
+        gnn_opp_dvy_mean=("dvy_opp_w", "sum"),
+        gnn_ally_cnt=("is_ally", "sum"),
+        gnn_opp_cnt=("is_ally", lambda s: float(len(s) - s.sum())),
+        gnn_ally_dmin=("dist_ally", "min"),
+        gnn_ally_dmean=("dist_ally", "mean"),
+        gnn_opp_dmin=("dist_opp", "min"),
+        gnn_opp_dmean=("dist_opp", "mean"),
+    ).reset_index()
+    
+    near = tmp.loc[tmp["rnk"] <= 3, keys + ["rnk", "dist"]].copy()
+    if len(near) > 0:
+        near["rnk"] = near["rnk"].astype(int)
+        dwide = near.pivot_table(index=keys, columns="rnk", values="dist", aggfunc="first")
+        dwide = dwide.rename(columns={1: "gnn_d1", 2: "gnn_d2", 3: "gnn_d3"}).reset_index()
+        ag = ag.merge(dwide, on=keys, how="left")
+    
+    for c in ["gnn_ally_dx_mean", "gnn_ally_dy_mean", "gnn_ally_dvx_mean", "gnn_ally_dvy_mean",
+              "gnn_opp_dx_mean", "gnn_opp_dy_mean", "gnn_opp_dvx_mean", "gnn_opp_dvy_mean"]:
+        ag[c] = ag[c].fillna(0.0)
+    for c in ["gnn_ally_cnt", "gnn_opp_cnt"]:
+        ag[c] = ag[c].fillna(0.0)
+    for c in ["gnn_ally_dmin", "gnn_opp_dmin", "gnn_ally_dmean", "gnn_opp_dmean", 
+              "gnn_d1", "gnn_d2", "gnn_d3"]:
+        ag[c] = ag[c].fillna(radius if radius is not None else 30.0)
+    
+    return ag
 
-def prepare_sequences_with_advanced_features(input_df, output_df=None, test_template=None, 
-                                            is_training=True, window_size=Config.WINDOW_SIZE):
-    print(f"PREPARING SEQUENCES WITH ADVANCED FEATURES")
-    print(f"Window size: {window_size}")
+# ============================================================================
+# SEQUENCE PREPARATION WITH GEOMETRIC FEATURES
+# ============================================================================
+
+def prepare_sequences_geometric(input_df, output_df=None, test_template=None, 
+                                is_training=True, window_size=10,
+                                route_kmeans=None, route_scaler=None):
+    """YOUR 154 features + 13 geometric features = 167 total"""
+    
+    print(f"\n{'='*80}")
+    print(f"PREPARING GEOMETRIC SEQUENCES")
+    print(f"{'='*80}")
+    
+    # 🔄 まずプレイ方向を右基準に統一
+    input_df = unify_play_direction(input_df)
+    if is_training and output_df is not None:
+        output_df = unify_play_direction(output_df)
     
     input_df = input_df.copy()
+    input_df = input_df.sort_values(['game_id', 'play_id', 'nfl_id', 'frame_id'])
     
-    # BASIC FEATURES
-    print("Step 1/3: Adding basic features...")
+    print("Step 1: Base features...")
     
     input_df['player_height_feet'] = input_df['player_height'].apply(height_to_feet)
+    height_parts = input_df['player_height'].str.split('-', expand=True)
+    input_df['height_inches'] = height_parts[0].astype(float) * 12 + height_parts[1].astype(float)
+    input_df['bmi'] = (input_df['player_weight'] / (input_df['height_inches']**2)) * 703
     
     dir_rad = np.deg2rad(input_df['dir'].fillna(0))
-    delta_t = 0.1
-    input_df['velocity_x'] = (input_df['s'] + 0.5 * input_df['a'] * delta_t) * np.sin(dir_rad)
-    input_df['velocity_y'] = (input_df['s'] + 0.5 * input_df['a'] * delta_t) * np.cos(dir_rad)
-    input_df['acceleration_x'] = input_df['a'] * np.sin(dir_rad)
-    input_df['acceleration_y'] = input_df['a'] * np.cos(dir_rad)
+    input_df['velocity_x'] = input_df['s'] * np.sin(dir_rad)
+    input_df['velocity_y'] = input_df['s'] * np.cos(dir_rad)
+    input_df['acceleration_x'] = input_df['a'] * np.cos(dir_rad)
+    input_df['acceleration_y'] = input_df['a'] * np.sin(dir_rad)
     
-    # Roles
+    input_df['speed_squared'] = input_df['s'] ** 2
+    input_df['accel_magnitude'] = np.sqrt(input_df['acceleration_x']**2 + input_df['acceleration_y']**2)
+    input_df['momentum_x'] = input_df['velocity_x'] * input_df['player_weight']
+    input_df['momentum_y'] = input_df['velocity_y'] * input_df['player_weight']
+    input_df['kinetic_energy'] = 0.5 * input_df['player_weight'] * input_df['speed_squared']
+    
+    input_df['orientation_diff'] = np.abs(input_df['o'] - input_df['dir'])
+    input_df['orientation_diff'] = np.minimum(input_df['orientation_diff'], 360 - input_df['orientation_diff'])
+    
     input_df['is_offense'] = (input_df['player_side'] == 'Offense').astype(int)
     input_df['is_defense'] = (input_df['player_side'] == 'Defense').astype(int)
     input_df['is_receiver'] = (input_df['player_role'] == 'Targeted Receiver').astype(int)
     input_df['is_coverage'] = (input_df['player_role'] == 'Defensive Coverage').astype(int)
     input_df['is_passer'] = (input_df['player_role'] == 'Passer').astype(int)
+    input_df['role_targeted_receiver'] = input_df['is_receiver']
+    input_df['role_defensive_coverage'] = input_df['is_coverage']
+    input_df['role_passer'] = input_df['is_passer']
+    input_df['side_offense'] = input_df['is_offense']
     
-    # Physics
-    mass_kg = input_df['player_weight'].fillna(200.0) / 2.20462
-    input_df['momentum_x'] = input_df['velocity_x'] * mass_kg
-    input_df['momentum_y'] = input_df['velocity_y'] * mass_kg
-    input_df['kinetic_energy'] = 0.5 * mass_kg * (input_df['s'] ** 2)
-    
-    # Ball features
     if 'ball_land_x' in input_df.columns:
         ball_dx = input_df['ball_land_x'] - input_df['x']
         ball_dy = input_df['ball_land_y'] - input_df['y']
         input_df['distance_to_ball'] = np.sqrt(ball_dx**2 + ball_dy**2)
+        input_df['dist_to_ball'] = input_df['distance_to_ball']
+        input_df['dist_squared'] = input_df['distance_to_ball'] ** 2
         input_df['angle_to_ball'] = np.arctan2(ball_dy, ball_dx)
         input_df['ball_direction_x'] = ball_dx / (input_df['distance_to_ball'] + 1e-6)
         input_df['ball_direction_y'] = ball_dy / (input_df['distance_to_ball'] + 1e-6)
-        input_df['closing_speed'] = (
+        input_df['closing_speed_ball'] = (
             input_df['velocity_x'] * input_df['ball_direction_x'] +
             input_df['velocity_y'] * input_df['ball_direction_y']
         )
+        input_df['velocity_toward_ball'] = (
+            input_df['velocity_x'] * np.cos(input_df['angle_to_ball']) + 
+            input_df['velocity_y'] * np.sin(input_df['angle_to_ball'])
+        )
+        input_df['velocity_alignment'] = np.cos(input_df['angle_to_ball'] - dir_rad)
+        input_df['angle_diff'] = np.abs(input_df['o'] - np.degrees(input_df['angle_to_ball']))
+        input_df['angle_diff'] = np.minimum(input_df['angle_diff'], 360 - input_df['angle_diff'])
     
-    # Sort for temporal
-    input_df = input_df.sort_values(['game_id', 'play_id', 'nfl_id', 'frame_id'])
+    print("Step 2: Advanced features...")
+    
+    opp_features = get_opponent_features(input_df)
+    input_df = input_df.merge(opp_features, on=['game_id', 'play_id', 'nfl_id'], how='left')
+    
+    if is_training:
+        route_features, route_kmeans, route_scaler = extract_route_patterns(input_df)
+    else:
+        route_features = extract_route_patterns(input_df, route_kmeans, route_scaler, fit=False)
+    input_df = input_df.merge(route_features, on=['game_id', 'play_id', 'nfl_id'], how='left')
+    
+    if not route_features.empty:
+        input_df = input_df.merge(route_features, on=['game_id', 'play_id', 'nfl_id'], how='left')
+
+    gnn_features = compute_neighbor_embeddings(input_df)
+    input_df = input_df.merge(gnn_features, on=['game_id', 'play_id', 'nfl_id'], how='left')
+    
+    if 'nearest_opp_dist' in input_df.columns:
+        input_df['pressure'] = 1 / np.maximum(input_df['nearest_opp_dist'], 0.5)
+        input_df['under_pressure'] = (input_df['nearest_opp_dist'] < 3).astype(int)
+        input_df['pressure_x_speed'] = input_df['pressure'] * input_df['s']
+    
+    if 'mirror_wr_vx' in input_df.columns:
+        s_safe = np.maximum(input_df['s'], 0.1)
+        input_df['mirror_similarity'] = (
+            input_df['velocity_x'] * input_df['mirror_wr_vx'] + 
+            input_df['velocity_y'] * input_df['mirror_wr_vy']
+        ) / s_safe
+        input_df['mirror_offset_dist'] = np.sqrt(
+            input_df['mirror_offset_x']**2 + input_df['mirror_offset_y']**2
+        )
+        input_df['mirror_alignment'] = input_df['mirror_similarity'] * input_df['role_defensive_coverage']
+    
+    print("Step 3: Temporal features...")
+    
     gcols = ['game_id', 'play_id', 'nfl_id']
     
-    # Original lag features (1-3)
-    for lag in [1, 2, 3]:
-        input_df[f'x_lag{lag}'] = input_df.groupby(gcols)['x'].shift(lag)
-        input_df[f'y_lag{lag}'] = input_df.groupby(gcols)['y'].shift(lag)
-        input_df[f'velocity_x_lag{lag}'] = input_df.groupby(gcols)['velocity_x'].shift(lag)
-        input_df[f'velocity_y_lag{lag}'] = input_df.groupby(gcols)['velocity_y'].shift(lag)
+    for lag in [1, 2, 3, 4, 5]:
+        for col in ['x', 'y', 'velocity_x', 'velocity_y', 's', 'a']:
+            if col in input_df.columns:
+                input_df[f'{col}_lag{lag}'] = input_df.groupby(gcols)[col].shift(lag)
     
-    # EMA features
+    for window in [3, 5]:
+        for col in ['x', 'y', 'velocity_x', 'velocity_y', 's']:
+            if col in input_df.columns:
+                input_df[f'{col}_rolling_mean_{window}'] = (
+                    input_df.groupby(gcols)[col]
+                      .rolling(window, min_periods=1).mean()
+                      .reset_index(level=[0,1,2], drop=True)
+                )
+                input_df[f'{col}_rolling_std_{window}'] = (
+                    input_df.groupby(gcols)[col]
+                      .rolling(window, min_periods=1).std()
+                      .reset_index(level=[0,1,2], drop=True)
+                )
+    
+    for col in ['velocity_x', 'velocity_y']:
+        if col in input_df.columns:
+            input_df[f'{col}_delta'] = input_df.groupby(gcols)[col].diff()
+    
     input_df['velocity_x_ema'] = input_df.groupby(gcols)['velocity_x'].transform(
         lambda x: x.ewm(alpha=0.3, adjust=False).mean()
     )
@@ -372,306 +620,117 @@ def prepare_sequences_with_advanced_features(input_df, output_df=None, test_temp
         lambda x: x.ewm(alpha=0.3, adjust=False).mean()
     )
     
-    # ADVANCED FEATURES
-    print("Step 2/4: Adding advanced features...")
-    input_df = add_advanced_features(input_df)
+    print("Step 4: Time features...")
     
-    # PLAYER INTERACTION FEATURES
-    print("Step 3/4: Adding player interaction features...")
-    use_players_interactions = True  # Enable player interaction features
-    if use_players_interactions:
-        agg_rows = []
-        # Group once (avoid overhead of apply per small group)
-        for (g, p, f), grp in input_df.groupby(['game_id', 'play_id', 'frame_id'], sort=False):
-            n = len(grp)
-            nfl_ids = grp['nfl_id'].to_numpy()
-            # Only compute/emit for player_to_predict==True (if column exists)
-            compute_mask = grp['player_to_predict'].to_numpy().astype(bool) if 'player_to_predict' in grp.columns else np.ones(n, dtype=bool)
-            if n < 2:
-                # Create empty stats rows (NaNs) only for players to predict
-                for nid in nfl_ids[compute_mask]:
-                    agg_rows.append({
-                        'game_id': g, 'play_id': p, 'frame_id': f, 'nfl_id': nid,
-                        'distance_to_player_mean_offense': np.nan,
-                        'distance_to_player_min_offense': np.nan,
-                        'distance_to_player_max_offense': np.nan,
-                        'relative_velocity_magnitude_mean_offense': np.nan,
-                        'relative_velocity_magnitude_min_offense': np.nan,
-                        'relative_velocity_magnitude_max_offense': np.nan,
-                        'angle_to_player_mean_offense': np.nan,
-                        'angle_to_player_min_offense': np.nan,
-                        'angle_to_player_max_offense': np.nan,
-                        'distance_to_player_mean_defense': np.nan,
-                        'distance_to_player_min_defense': np.nan,
-                        'distance_to_player_max_defense': np.nan,
-                        'relative_velocity_magnitude_mean_defense': np.nan,
-                        'relative_velocity_magnitude_min_defense': np.nan,
-                        'relative_velocity_magnitude_max_defense': np.nan,
-                        'angle_to_player_mean_defense': np.nan,
-                        'angle_to_player_min_defense': np.nan,
-                        'angle_to_player_max_defense': np.nan,
-                        'nearest_opponent_dist': np.nan,
-                        'nearest_opponent_angle': np.nan,
-                        'nearest_opponent_rel_speed': np.nan,
-                    })
-                continue
-
-            x = grp['x'].to_numpy(dtype=np.float32)
-            y = grp['y'].to_numpy(dtype=np.float32)
-            vx = grp['velocity_x'].to_numpy(dtype=np.float32)
-            vy = grp['velocity_y'].to_numpy(dtype=np.float32)
-            is_offense = grp['is_offense'].to_numpy()
-            is_defense = grp['is_defense'].to_numpy()
-
-            # Pairwise deltas (broadcast)
-            dx = x[None, :] - x[:, None]        # (n,n) x_j - x_i reversed later for angle
-            dy = y[None, :] - y[:, None]
-            # Angle from i -> j (want y_j - y_i, x_j - x_i)
-            angle_mat = np.arctan2(-dy, -dx)    # because dx currently x[None]-x[:,None] => -(x_j - x_i)
-
-            # Distances
-            dist = np.sqrt(dx ** 2 + dy ** 2)
-            # Relative velocity magnitudes
-            dvx = vx[:, None] - vx[None, :]
-            dvy = vy[:, None] - vy[None, :]
-            rel_speed = np.sqrt(dvx ** 2 + dvy ** 2)
-
-            # Offense mask (exclude self)
-            offense_mask = (is_offense[:, None] == is_offense[None, :])
-            np.fill_diagonal(offense_mask, False)
-
-            # Defense mask (exclude self)
-            defense_mask = (is_defense[:, None] == is_defense[None, :])
-            np.fill_diagonal(defense_mask, False)
-
-            # Opponent mask (exclude self)
-            opp_mask = (is_offense[:, None] != is_offense[None, :])
-            np.fill_diagonal(opp_mask, False)
-
-            # Mask out self distances
-            dist_diag_nan = dist.copy()
-            np.fill_diagonal(dist_diag_nan, np.nan)
-            rel_diag_nan = rel_speed.copy()
-            np.fill_diagonal(rel_diag_nan, np.nan)
-            angle_diag_nan = angle_mat.copy()
-            np.fill_diagonal(angle_diag_nan, np.nan)
-
-            def masked_stats(mat, mask):
-                # mat, mask shape (n,n)
-                masked = np.where(mask, mat, np.nan)
-                cnt = mask.sum(axis=1)
-                mean = np.nanmean(masked, axis=1)
-                amin = np.nanmin(masked, axis=1)
-                amax = np.nanmax(masked, axis=1)
-                # Rows with zero valid -> set nan
-                zero = cnt == 0
-                mean[zero] = np.nan; amin[zero] = np.nan; amax[zero] = np.nan
-                return mean, amin, amax
-
-            d_mean_o, d_min_o, d_max_o = masked_stats(dist_diag_nan, offense_mask)
-            v_mean_o, v_min_o, v_max_o = masked_stats(rel_diag_nan, offense_mask)
-            a_mean_o, a_min_o, a_max_o = masked_stats(angle_diag_nan, offense_mask)
-
-            d_mean_d, d_min_d, d_max_d = masked_stats(dist_diag_nan, defense_mask)
-            v_mean_d, v_min_d, v_max_d = masked_stats(rel_diag_nan, defense_mask)
-            a_mean_d, a_min_d, a_max_d = masked_stats(angle_diag_nan, defense_mask)
-
-            # NEW: nearest opponent stats
-            masked_dist_opp = np.where(opp_mask, dist_diag_nan, np.nan)         # (n,n)
-            nearest_dist = np.nanmin(masked_dist_opp, axis=1)                   # (n,)
-            nearest_idx = np.nanargmin(masked_dist_opp, axis=1)                 # (n,)
-            # Guard where all-NaN rows (no opponents)
-            all_nan = ~np.isfinite(nearest_dist)
-            nearest_idx_safe = nearest_idx.copy()
-            nearest_idx_safe[all_nan] = 0
-            nearest_angle = np.take_along_axis(angle_diag_nan, nearest_idx_safe[:, None], axis=1).squeeze(1)
-            nearest_rel = np.take_along_axis(rel_diag_nan, nearest_idx_safe[:, None], axis=1).squeeze(1)
-            nearest_angle[all_nan] = np.nan
-            nearest_rel[all_nan] = np.nan
-
-            for idx, nid in enumerate(nfl_ids):
-                if not compute_mask[idx]:
-                    continue  # only for player_to_predict==True
-                agg_rows.append({
-                    'game_id': g, 'play_id': p, 'frame_id': f, 'nfl_id': nid,
-                    'distance_to_player_mean_offense': d_mean_o[idx],
-                    'distance_to_player_min_offense': d_min_o[idx],
-                    'distance_to_player_max_offense': d_max_o[idx],
-                    'relative_velocity_magnitude_mean_offense': v_mean_o[idx],  # Fixed typo: was v_mean_o[ix]
-                    'relative_velocity_magnitude_min_offense': v_min_o[idx],
-                    'relative_velocity_magnitude_max_offense': v_max_o[idx],
-                    'angle_to_player_mean_offense': a_mean_o[idx],
-                    'angle_to_player_min_offense': a_min_o[idx],
-                    'angle_to_player_max_offense': a_max_o[idx],
-                    'distance_to_player_mean_defense': d_mean_d[idx],
-                    'distance_to_player_min_defense': d_min_d[idx],
-                    'distance_to_player_max_defense': d_max_d[idx],
-                    'relative_velocity_magnitude_mean_defense': v_mean_d[idx],
-                    'relative_velocity_magnitude_min_defense': v_min_d[idx],
-                    'relative_velocity_magnitude_max_defense': v_max_d[idx],
-                    'angle_to_player_mean_defense': a_mean_d[idx],
-                    'angle_to_player_min_defense': a_min_d[idx],
-                    'angle_to_player_max_defense': a_max_d[idx],
-                    'nearest_opponent_dist': nearest_dist[idx],
-                    'nearest_opponent_angle': nearest_angle[idx],
-                    'nearest_opponent_rel_speed': nearest_rel[idx],
-                })
-
-        interaction_agg = pd.DataFrame(agg_rows)
-        input_df = input_df.merge(
-            interaction_agg,
-            on=['game_id', 'play_id', 'frame_id', 'nfl_id'],
-            how='left'
-        )
-    else:
-        print("Skipping player interaction feature computation (use_players_interactions=False).")
+    if 'num_frames_output' in input_df.columns:
+        max_frames = input_df['num_frames_output']
+        
+        input_df['max_play_duration'] = max_frames / 10.0
+        input_df['frame_time'] = input_df['frame_id'] / 10.0
+        input_df['progress_ratio'] = input_df['frame_id'] / np.maximum(max_frames, 1)
+        input_df['time_remaining'] = (max_frames - input_df['frame_id']) / 10.0
+        input_df['frames_remaining'] = max_frames - input_df['frame_id']
+        
+        input_df['expected_x_at_ball'] = input_df['x'] + input_df['velocity_x'] * input_df['frame_time']
+        input_df['expected_y_at_ball'] = input_df['y'] + input_df['velocity_y'] * input_df['frame_time']
+        
+        if 'ball_land_x' in input_df.columns:
+            input_df['error_from_ball_x'] = input_df['expected_x_at_ball'] - input_df['ball_land_x']
+            input_df['error_from_ball_y'] = input_df['expected_y_at_ball'] - input_df['ball_land_y']
+            input_df['error_from_ball'] = np.sqrt(
+                input_df['error_from_ball_x']**2 + input_df['error_from_ball_y']**2
+            )
+            
+            input_df['weighted_dist_by_time'] = input_df['dist_to_ball'] / (input_df['frame_time'] + 0.1)
+            input_df['dist_scaled_by_progress'] = input_df['dist_to_ball'] * (1 - input_df['progress_ratio'])
+        
+        input_df['time_squared'] = input_df['frame_time'] ** 2
+        input_df['velocity_x_progress'] = input_df['velocity_x'] * input_df['progress_ratio']
+        input_df['velocity_y_progress'] = input_df['velocity_y'] * input_df['progress_ratio']
+        input_df['speed_scaled_by_time_left'] = input_df['s'] * input_df['time_remaining']
+        
+        input_df['actual_play_length'] = max_frames
+        input_df['length_ratio'] = max_frames / 30.0
     
-    # GNN LITE FEATURES
-    print("Step 4/4: Adding GNN Lite features...")
-    gnn_processor = GNNLiteProcessor()
-    gnn_features = gnn_processor.compute_neighbor_embeddings(input_df)
+    # 🎯 THE BREAKTHROUGH: Add geometric features
+    print("Step 5: 🎯 Geometric endpoint features...")
+    input_df = add_geometric_features(input_df)
     
-    # Merge GNN features back to input_df
-    input_df = input_df.merge(
-        gnn_features,
-        on=['game_id', 'play_id', 'nfl_id'],
-        how='left'
-    )
+    print("Step 6: Building feature list...")
     
-    # Fill NaN values for GNN features
-    gnn_cols = [c for c in input_df.columns if c.startswith('gnn_')]
-    for col in gnn_cols:
-        if col in ['gnn_ally_cnt', 'gnn_opp_cnt']:
-            input_df[col] = input_df[col].fillna(0.0)
-        elif 'mean' in col or 'dx' in col or 'dy' in col or 'dvx' in col or 'dvy' in col:
-            input_df[col] = input_df[col].fillna(0.0)
-        else:  # distance features
-            input_df[col] = input_df[col].fillna(Config.RADIUS)
-    
-    # FEATURE LIST
-    print("Step 3/3: Creating sequences...")
-    
+    # Your 154 proven features
     feature_cols = [
-        # Core (9)
         'x', 'y', 's', 'a', 'o', 'dir', 'frame_id', 'ball_land_x', 'ball_land_y',
-        
-        # Player (2)
-        'player_height_feet', 'player_weight',
-        
-        # Motion (7)
+        'player_height_feet', 'player_weight', 'height_inches', 'bmi',
         'velocity_x', 'velocity_y', 'acceleration_x', 'acceleration_y',
         'momentum_x', 'momentum_y', 'kinetic_energy',
-        
-        # Roles (5)
+        'speed_squared', 'accel_magnitude', 'orientation_diff',
         'is_offense', 'is_defense', 'is_receiver', 'is_coverage', 'is_passer',
-        
-        # Ball (5)
-        'distance_to_ball', 'angle_to_ball', 'ball_direction_x', 'ball_direction_y', 'closing_speed',
-        
-        # Original temporal (15)
-        'x_lag1', 'y_lag1', 'velocity_x_lag1', 'velocity_y_lag1',
-        'x_lag2', 'y_lag2', 'velocity_x_lag2', 'velocity_y_lag2',
-        'x_lag3', 'y_lag3', 'velocity_x_lag3', 'velocity_y_lag3',
-        'velocity_x_ema', 'velocity_y_ema', 'speed_ema',
-        
-        # NEW: Distance rate (3)
-        'distance_to_ball_change', 'distance_to_ball_accel', 'time_to_intercept',
-        
-        # NEW: Target alignment (3)
-        'velocity_alignment', 'velocity_perpendicular', 'accel_alignment',
-        
-        # NEW: Multi-window rolling (24)
-        'velocity_x_roll3', 'velocity_x_std3', 'velocity_y_roll3', 'velocity_y_std3',
-        's_roll3', 's_std3', 'a_roll3', 'a_std3',
-        'velocity_x_roll5', 'velocity_x_std5', 'velocity_y_roll5', 'velocity_y_std5',
-        's_roll5', 's_std5', 'a_roll5', 'a_std5',
-        'velocity_x_roll10', 'velocity_x_std10', 'velocity_y_roll10', 'velocity_y_std10',
-        's_roll10', 's_std10', 'a_roll10', 'a_std10',
-        
-        # NEW: Extended lags (8)
-        'x_lag4', 'y_lag4', 'velocity_x_lag4', 'velocity_y_lag4',
-        'x_lag5', 'y_lag5', 'velocity_x_lag5', 'velocity_y_lag5',
-        
-        # NEW: Velocity changes (4)
-        'velocity_x_change', 'velocity_y_change', 'speed_change', 'direction_change',
-        
-        # NEW: Field position (4)
-        'dist_from_sideline', 'dist_from_endzone',
-        
-        # NEW: Role-specific (3)
-        'receiver_optimality', 'receiver_deviation', 'defender_closing_speed',
-        
-        # NEW: Time (2)
-        'frames_elapsed', 'normalized_time',
-        
-        # GNN LITE FEATURES (20)
-        'gnn_ally_cnt', 'gnn_opp_cnt',
+        'role_targeted_receiver', 'role_defensive_coverage', 'role_passer', 'side_offense',
+        'distance_to_ball', 'dist_to_ball', 'dist_squared', 'angle_to_ball', 
+        'ball_direction_x', 'ball_direction_y', 'closing_speed_ball',
+        'velocity_toward_ball', 'velocity_alignment', 'angle_diff',
+        'nearest_opp_dist', 'closing_speed', 'num_nearby_opp_3', 'num_nearby_opp_5',
+        'mirror_wr_vx', 'mirror_wr_vy', 'mirror_offset_x', 'mirror_offset_y',
+        'pressure', 'under_pressure', 'pressure_x_speed', 
+        'mirror_similarity', 'mirror_offset_dist', 'mirror_alignment',
+        'route_pattern', 'traj_straightness', 'traj_max_turn', 'traj_mean_turn',
+        'traj_depth', 'traj_width', 'speed_mean', 'speed_change',
         'gnn_ally_dx_mean', 'gnn_ally_dy_mean', 'gnn_ally_dvx_mean', 'gnn_ally_dvy_mean',
         'gnn_opp_dx_mean', 'gnn_opp_dy_mean', 'gnn_opp_dvx_mean', 'gnn_opp_dvy_mean',
-        'gnn_ally_dist_1', 'gnn_ally_dist_2', 'gnn_ally_dist_3',
-        'gnn_opp_dist_1', 'gnn_opp_dist_2', 'gnn_opp_dist_3',
-        'gnn_nearest_ally_dist', 'gnn_nearest_opp_dist',
-        'gnn_ally_attention_sum', 'gnn_opp_attention_sum',
-        
-        # PLAYER INTERACTION FEATURES (21)
-        'd_mean_o', 'd_min_o', 'd_max_o',  # offensive distance stats
-        'd_mean_d', 'd_min_d', 'd_max_d',  # defensive distance stats
-        'v_mean_o', 'v_min_o', 'v_max_o',  # offensive velocity stats
-        'v_mean_d', 'v_min_d', 'v_max_d',  # defensive velocity stats
-        'a_mean_o', 'a_min_o', 'a_max_o',  # offensive angle stats
-        'a_mean_d', 'a_min_d', 'a_max_d',  # defensive angle stats
-        'nearest_opp_dist', 'nearest_opp_angle', 'nearest_opp_rel_speed',  # nearest opponent stats
+        'gnn_ally_cnt', 'gnn_opp_cnt',
+        'gnn_ally_dmin', 'gnn_ally_dmean', 'gnn_opp_dmin', 'gnn_opp_dmean',
+        'gnn_d1', 'gnn_d2', 'gnn_d3',
     ]
     
-    # Filter to existing
-    feature_cols = [c for c in feature_cols if c in input_df.columns]
-    print(f"Using {len(feature_cols)} features (was ~50, now ~90)")
+    for lag in [1, 2, 3, 4, 5]:
+        for col in ['x', 'y', 'velocity_x', 'velocity_y', 's', 'a']:
+            feature_cols.append(f'{col}_lag{lag}')
     
-    # CREATE SEQUENCES
+    for window in [3, 5]:
+        for col in ['x', 'y', 'velocity_x', 'velocity_y', 's']:
+            feature_cols.append(f'{col}_rolling_mean_{window}')
+            feature_cols.append(f'{col}_rolling_std_{window}')
+    
+    feature_cols.extend(['velocity_x_delta', 'velocity_y_delta'])
+    feature_cols.extend(['velocity_x_ema', 'velocity_y_ema', 'speed_ema'])
+    
+    feature_cols.extend([
+        'max_play_duration', 'frame_time', 'progress_ratio', 'time_remaining', 'frames_remaining',
+        'expected_x_at_ball', 'expected_y_at_ball', 
+        'error_from_ball_x', 'error_from_ball_y', 'error_from_ball',
+        'time_squared', 'weighted_dist_by_time', 
+        'velocity_x_progress', 'velocity_y_progress', 'dist_scaled_by_progress',
+        'speed_scaled_by_time_left', 'actual_play_length', 'length_ratio',
+    ])
+    
+    # 🎯 Add 13 geometric features
+    feature_cols.extend([
+        'geo_endpoint_x', 'geo_endpoint_y',
+        'geo_vector_x', 'geo_vector_y', 'geo_distance',
+        'geo_required_vx', 'geo_required_vy',
+        'geo_velocity_error_x', 'geo_velocity_error_y', 'geo_velocity_error',
+        'geo_required_ax', 'geo_required_ay',
+        'geo_alignment',
+    ])
+    
+    feature_cols = [c for c in feature_cols if c in input_df.columns]
+    print(f"✓ Using {len(feature_cols)} features (154 proven + 13 geometric)")
+    
+    print("Step 7: Creating sequences...")
+    
     input_df.set_index(['game_id', 'play_id', 'nfl_id'], inplace=True)
     grouped = input_df.groupby(level=['game_id', 'play_id', 'nfl_id'])
     
     target_rows = output_df if is_training else test_template
     target_groups = target_rows[['game_id', 'play_id', 'nfl_id']].drop_duplicates()
     
-    # Pre-compute group means for faster fillna operations
-    print("Pre-computing group statistics...")
-    group_means = grouped.mean(numeric_only=True)
-    
-    # Pre-create output lookup dictionary for training
-    output_lookup = {}
-    if is_training:
-        print("Creating output lookup dictionary...")
-        for _, row in output_df.iterrows():
-            key = (row['game_id'], row['play_id'], row['nfl_id'])
-            if key not in output_lookup:
-                output_lookup[key] = []
-            output_lookup[key].append({
-                'x': row['x'], 'y': row['y'], 'frame_id': row['frame_id']
-            })
-        
-        # Sort each group by frame_id
-        for key in output_lookup:
-            output_lookup[key] = sorted(output_lookup[key], key=lambda x: x['frame_id'])
-    
     sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = [], [], [], [], []
+    geo_endpoints_x, geo_endpoints_y = [], []
     
-    # Convert target_groups to list of tuples for faster iteration
-    target_keys = [(row['game_id'], row['play_id'], row['nfl_id']) 
-                   for _, row in target_groups.iterrows()]
-    
-    # Pre-allocate arrays for better memory efficiency
-    num_sequences = len(target_keys)
-    print(f"Processing {num_sequences} sequences...")
-    
-    # Pre-allocate lists with estimated capacity
-    sequences = []
-    if is_training:
-        targets_dx = []
-        targets_dy = []
-        targets_frame_ids = []
-    sequence_ids = []
-    for key in tqdm(target_keys, desc="Creating sequences"):
+    for _, row in tqdm(target_groups.iterrows(), total=len(target_groups), desc="Creating sequences"):
+        key = (row['game_id'], row['play_id'], row['nfl_id'])
+        
         try:
             group_df = grouped.get_group(key)
         except KeyError:
@@ -686,12 +745,7 @@ def prepare_sequences_with_advanced_features(input_df, output_df=None, test_temp
             pad_df = pd.DataFrame(np.nan, index=range(pad_len), columns=input_window.columns)
             input_window = pd.concat([pad_df, input_window], ignore_index=True)
         
-        # Use pre-computed means for faster fillna
-        if key in group_means.index:
-            input_window = input_window.fillna(group_means.loc[key])
-        else:
-            input_window = input_window.fillna(0.0)
-        
+        input_window = input_window.fillna(group_df.mean(numeric_only=True))
         seq = input_window[feature_cols].values
         
         if np.isnan(seq).any():
@@ -701,19 +755,28 @@ def prepare_sequences_with_advanced_features(input_df, output_df=None, test_temp
         
         sequences.append(seq)
         
-        if is_training and key in output_lookup:
-            out_data = output_lookup[key]
+        # Store geometric endpoint for this player
+        geo_x = input_window.iloc[-1]['geo_endpoint_x']
+        geo_y = input_window.iloc[-1]['geo_endpoint_y']
+        geo_endpoints_x.append(geo_x)
+        geo_endpoints_y.append(geo_y)
+        
+        if is_training:
+            out_grp = output_df[
+                (output_df['game_id']==row['game_id']) &
+                (output_df['play_id']==row['play_id']) &
+                (output_df['nfl_id']==row['nfl_id'])
+            ].sort_values('frame_id')
             
             last_x = input_window.iloc[-1]['x']
             last_y = input_window.iloc[-1]['y']
             
-            dx = np.array([d['x'] for d in out_data]) - last_x
-            dy = np.array([d['y'] for d in out_data]) - last_y
-            frame_ids = np.array([d['frame_id'] for d in out_data])
+            dx = out_grp['x'].values - last_x
+            dy = out_grp['y'].values - last_y
             
             targets_dx.append(dx)
             targets_dy.append(dy)
-            targets_frame_ids.append(frame_ids)
+            targets_frame_ids.append(out_grp['frame_id'].values)
         
         sequence_ids.append({
             'game_id': key[0],
@@ -722,13 +785,132 @@ def prepare_sequences_with_advanced_features(input_df, output_df=None, test_temp
             'frame_id': input_window.iloc[-1]['frame_id']
         })
     
-    print(f"Created {len(sequences)} sequences with {len(feature_cols)} features each")
+    print(f"✓ Created {len(sequences)} sequences")
     
     if is_training:
-        return sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids
-    return sequences, sequence_ids
+        return (sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids, 
+                geo_endpoints_x, geo_endpoints_y, route_kmeans, route_scaler)
+    return sequences, sequence_ids, geo_endpoints_x, geo_endpoints_y
 
-# loss
+# ============================================================================
+# MODEL ARCHITECTURE (ST-TRANSFORMER with ResidualMLP Head)
+# ============================================================================
+class ResidualBlock(nn.Module):
+    """
+    一个标准的残差块：FFN + 快捷连接
+    """
+    def __init__(self, dim, hidden_dim, dropout=0.1):
+        super().__init__()
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout)
+        )
+        self.norm = nn.LayerNorm(dim)
+    
+    def forward(self, x):
+        # Pre-normalization
+        return x + self.ffn(self.norm(x))
+
+class ResidualMLPHead(nn.Module):
+    """
+    替换原有的 nn.Sequential Head
+    """
+    def __init__(self, input_dim, hidden_dim, output_dim, n_res_blocks=2, dropout=0.2):
+        super().__init__()
+        # 1. 从 context_dim (128) 投影到 mlp_hidden_dim (256)
+        self.input_layer = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU()
+        )
+        
+        # 2. 一系列的残差块 (在 256 维度上操作)
+        self.residual_blocks = nn.Sequential(
+            *[ResidualBlock(hidden_dim, hidden_dim * 2, dropout) for _ in range(n_res_blocks)]
+        )
+        
+        # 3. 最后的 LayerNorm 和输出投影
+        self.output_norm = nn.LayerNorm(hidden_dim)
+        self.output_layer = nn.Linear(hidden_dim, output_dim)
+    
+    def forward(self, x):
+        x = self.input_layer(x)
+        x = self.residual_blocks(x)
+        x = self.output_norm(x)
+        x = self.output_layer(x)
+        return x
+
+class STTransformer(nn.Module):
+    """
+    Spatio-Temporal Transformer
+    """
+    def __init__(self, input_dim, hidden_dim, horizon, window_size, n_heads, n_layers, dropout=0.1):
+        super().__init__()
+        config = Config() # 获取 MLP 的超参数
+        self.horizon = horizon
+        self.hidden_dim = hidden_dim
+
+        # 1. Spatio: 特征嵌入
+        self.input_projection = nn.Linear(input_dim, hidden_dim)
+        
+        # 2. Temporal: 可学习的位置编码
+        self.pos_embed = nn.Parameter(torch.randn(1, window_size, hidden_dim)) 
+        self.embed_dropout = nn.Dropout(dropout)
+
+        # 3. Transformer Encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=n_heads,
+            dim_feedforward=hidden_dim * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation='gelu'
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=n_layers
+        )
+
+        # 4. 池化 (复用你成熟的 Attention Pooling 机制)
+        self.pool_ln = nn.LayerNorm(hidden_dim)
+        self.pool_attn = nn.MultiheadAttention(hidden_dim, num_heads=n_heads, batch_first=True)
+        self.pool_query = nn.Parameter(torch.randn(1, 1, hidden_dim)) 
+
+        # 5. 输出 Head (!!! 已替换为 ResidualMLPHead !!!)
+        self.head = ResidualMLPHead(
+            input_dim=hidden_dim,                   # 128
+            hidden_dim=config.MLP_HIDDEN_DIM,       # 256
+            output_dim=horizon * 2,                 # 188
+            n_res_blocks=config.N_RES_BLOCKS,       # 2
+            dropout=0.2
+        )
+
+    def forward(self, x):
+        B, S, _ = x.shape
+        x_embed = self.input_projection(x) 
+        x = x_embed + self.pos_embed[:, :S, :] 
+        x = self.embed_dropout(x)
+        
+        h = self.transformer_encoder(x) 
+
+        q = self.pool_query.expand(B, -1, -1)
+        ctx, _ = self.pool_attn(q, self.pool_ln(h), self.pool_ln(h))
+        ctx = ctx.squeeze(1) 
+
+        out = self.head(ctx) # <--- 使用新的 Head
+        out = out.view(B, self.horizon, 2)
+        
+        out = torch.cumsum(out, dim=1)
+        
+        return out
+
+
+# ============================================================================
+# LOSS (YOUR PROVEN TEMPORAL HUBER)
+# ============================================================================
+
 class TemporalHuber(nn.Module):
     def __init__(self, delta=0.5, time_decay=0.03):
         super().__init__()
@@ -744,175 +926,126 @@ class TemporalHuber(nn.Module):
         if self.time_decay > 0:
             L = pred.size(1)
             t = torch.arange(L, device=pred.device).float()
-            weight = torch.exp(-self.time_decay * t).view(1, L)
-            huber, mask = huber * weight, mask * weight
+            weight = torch.exp(-self.time_decay * t).view(1, L, 1)
+            huber = huber * weight
+            mask = mask.unsqueeze(-1) * weight
         
         return (huber * mask).sum() / (mask.sum() + 1e-8)
 
-# Conv-layered NN
-class SeqModel(nn.Module):
-    def __init__(self, input_dim, horizon):
-        super().__init__()
-        self.cnn = nn.Sequential(
-            nn.Conv1d(input_dim, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(128, 256, kernel_size=3, padding=1)
-        )
-        self.gru = nn.GRU(
-            input_dim, 128, 
-            num_layers=2, 
-            batch_first=True, 
-            dropout=0.15
-        )
-        self.gpu_proj = nn.Linear(256, 128)
-        
-        # Attention pooling inspired by CommonLit solution
-        self.attention_pooling = nn.Sequential(
-            nn.Linear(128, 64),
-            nn.Tanh(),
-            nn.Linear(64, 1),
-            nn.Softmax(dim=1)
-        )
-        
-        # Keep original multi-head attention as backup/ensemble option
-        self.pool_ln = nn.LayerNorm(128)
-        self.pool_attn = nn.MultiheadAttention(
-            128, num_heads=4, 
-            batch_first=True
-        )
-        self.pool_query = nn.Parameter(torch.randn(1, 1, 128))
-        
-        # Prediction head with residual connection
-        self.head = nn.Sequential(
-            nn.Linear(128, 128), 
-            nn.GELU(), 
-            nn.Dropout(0.2), 
-            nn.Linear(128, 64),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(64, horizon)
-        )
-        
-        # Learnable combination of pooling methods
-        self.pooling_weight = nn.Parameter(torch.tensor(0.5))
-    
-    def forward(self, x):
-        # GRU encoding
-        h, _ = self.gru(x)  # Shape: (batch_size, seq_len, 128)
-        B = h.shape[0]
-        
-        # Method 1: Attention pooling (CommonLit style)
-        # Compute attention weights for each timestep
-        attention_weights = self.attention_pooling(h)  # Shape: (batch_size, seq_len, 1)
-        # Weighted average of hidden states
-        context_vector_1 = torch.sum(attention_weights * h, dim=1)  # Shape: (batch_size, 128)
-        
-        # Method 2: Multi-head attention pooling (original)
-        q = self.pool_query.expand(B, -1, -1)
-        ctx_2, _ = self.pool_attn(q, self.pool_ln(h), self.pool_ln(h))
-        context_vector_2 = ctx_2.squeeze(1)  # Shape: (batch_size, 128)
-        
-        # Learnable combination of both pooling methods
-        alpha = torch.sigmoid(self.pooling_weight)
-        context_vector = alpha * context_vector_1 + (1 - alpha) * context_vector_2
-        
-        # Prediction head
-        out = self.head(context_vector)
-        return torch.cumsum(out, dim=1)
+# ============================================================================
+# TRAINING
+# ============================================================================
 
-# Custom Dataset class for proper DataLoader usage
-class NFLDataset(torch.utils.data.Dataset):
-    def __init__(self, sequences, targets, horizon):
-        self.sequences = sequences
-        self.targets = targets
-        self.horizon = horizon
-        
-    def __len__(self):
-        return len(self.sequences)
+def prepare_targets(batch_dx, batch_dy, max_h):
+    tensors_x, tensors_y, masks = [], [], []
     
-    def __getitem__(self, idx):
-        sequence = torch.tensor(self.sequences[idx].astype(np.float32))
-        target = self.targets[idx]
-        
-        # Prepare target with padding and mask
-        L = len(target)
-        padded_target = np.pad(target, (0, self.horizon - L), constant_values=0).astype(np.float32)
-        mask = np.zeros(self.horizon, dtype=np.float32)
+    for dx, dy in zip(batch_dx, batch_dy):
+        L = len(dx)
+        padded_x = np.pad(dx, (0, max_h - L), constant_values=0).astype(np.float32)
+        padded_y = np.pad(dy, (0, max_h - L), constant_values=0).astype(np.float32)
+        mask = np.zeros(max_h, dtype=np.float32)
         mask[:L] = 1.0
         
-        return sequence, torch.tensor(padded_target), torch.tensor(mask)
-
-# Custom collate function for variable length sequences
-def collate_fn(batch):
-    sequences, targets, masks = zip(*batch)
-    sequences = torch.stack(sequences)
-    targets = torch.stack(targets)
-    masks = torch.stack(masks)
-    return sequences, targets, masks
-
-def train_model(X_train, y_train, X_val, y_val, input_dim, horizon, Config):
-    device = Config.DEVICE
-    model = SeqModel(input_dim, horizon).to(device)
+        tensors_x.append(torch.tensor(padded_x))
+        tensors_y.append(torch.tensor(padded_y))
+        masks.append(torch.tensor(mask))
     
+    targets = torch.stack([torch.stack(tensors_x), torch.stack(tensors_y)], dim=-1)
+    return targets, torch.stack(masks)
+
+def compute_val_rmse(model, X_val, y_val_dx, y_val_dy, horizon, device, batch_size=256):
+    """
+    Compute validation RMSE (Root Mean Squared Error) for 2D trajectory prediction.
+    Returns the average Euclidean distance error across all predictions.
+    """
+    model.eval()
+    all_errors = []
+    
+    with torch.no_grad():
+        for i in range(0, len(X_val), batch_size):
+            end = min(i + batch_size, len(X_val))
+            bx = torch.tensor(np.stack(X_val[i:end]).astype(np.float32)).to(device)
+            
+            # Get predictions
+            pred = model(bx).cpu().numpy()  # Shape: (batch, horizon, 2)
+            
+            # Process each sample in the batch
+            for j, idx in enumerate(range(i, end)):
+                dx_true = y_val_dx[idx]
+                dy_true = y_val_dy[idx]
+                n_steps = len(dx_true)
+                
+                # Extract predictions for this sample
+                dx_pred = pred[j, :n_steps, 0]
+                dy_pred = pred[j, :n_steps, 1]
+                
+                # Compute Euclidean distance for each time step
+                sq_errors = (dx_pred - dx_true) ** 2 + (dy_pred - dy_true) ** 2
+                all_errors.extend(sq_errors)
+    
+    # Return RMSE
+    return np.sqrt(np.mean(all_errors))
+
+def train_model(X_train, y_train_dx, y_train_dy, X_val, y_val_dx, y_val_dy, 
+                input_dim, horizon, config):
+    device = config.DEVICE
+    
+    model = STTransformer(
+        input_dim=input_dim,
+        hidden_dim=config.HIDDEN_DIM,
+        horizon=horizon,
+        window_size=config.WINDOW_SIZE,
+        n_heads=config.N_HEADS,
+        n_layers=config.N_LAYERS
+    ).to(device)
     criterion = TemporalHuber(delta=0.5, time_decay=0.03)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5, verbose=False)
     
-    # Create datasets and dataloaders
-    train_dataset = NFLDataset(X_train, y_train, horizon)
-    val_dataset = NFLDataset(X_val, y_val, horizon)
+    train_batches = []
+    for i in range(0, len(X_train), config.BATCH_SIZE):
+        end = min(i + config.BATCH_SIZE, len(X_train))
+        bx = torch.tensor(np.stack(X_train[i:end]).astype(np.float32))
+        by, bm = prepare_targets(
+            [y_train_dx[j] for j in range(i, end)],
+            [y_train_dy[j] for j in range(i, end)],
+            horizon
+        )
+        train_batches.append((bx, by, bm))
     
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=Config.BATCH_SIZE, 
-        shuffle=True, 
-        collate_fn=collate_fn,
-        num_workers=0,  # Set to 0 for MPS compatibility
-        pin_memory=False  # Disable for MPS
-    )
-    
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=Config.BATCH_SIZE, 
-        shuffle=False, 
-        collate_fn=collate_fn,
-        num_workers=0,  # Set to 0 for MPS compatibility
-        pin_memory=False  # Disable for MPS
-    )
+    val_batches = []
+    for i in range(0, len(X_val), config.BATCH_SIZE):
+        end = min(i + config.BATCH_SIZE, len(X_val))
+        bx = torch.tensor(np.stack(X_val[i:end]).astype(np.float32))
+        by, bm = prepare_targets(
+            [y_val_dx[j] for j in range(i, end)],
+            [y_val_dy[j] for j in range(i, end)],
+            horizon
+        )
+        val_batches.append((bx, by, bm))
     
     best_loss, best_state, bad = float('inf'), None, 0
     
-    for epoch in range(1, Config.EPOCHS + 1):
+    for epoch in range(1, config.EPOCHS + 1):
         model.train()
         train_losses = []
-        
-        for batch_idx, (sequences, targets, masks) in enumerate(train_loader):
-            sequences = sequences.to(device)
-            targets = targets.to(device)
-            masks = masks.to(device)
-            
-            pred = model(sequences)
-            loss = criterion(pred, targets, masks)
-            
+        for bx, by, bm in train_batches:
+            bx, by, bm = bx.to(device), by.to(device), bm.to(device)
+            pred = model(bx)
+            loss = criterion(pred, by, bm)
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            
             train_losses.append(loss.item())
         
         model.eval()
         val_losses = []
         with torch.no_grad():
-            for sequences, targets, masks in val_loader:
-                sequences = sequences.to(device)
-                targets = targets.to(device)
-                masks = masks.to(device)
-                
-                pred = model(sequences)
-                val_losses.append(criterion(pred, targets, masks).item())
+            for bx, by, bm in val_batches:
+                bx, by, bm = bx.to(device), by.to(device), bm.to(device)
+                pred = model(bx)
+                val_losses.append(criterion(pred, by, bm).item())
         
         train_loss, val_loss = np.mean(train_losses), np.mean(val_losses)
         scheduler.step(val_loss)
@@ -926,7 +1059,7 @@ def train_model(X_train, y_train, X_val, y_val, input_dim, horizon, Config):
             bad = 0
         else:
             bad += 1
-            if bad >= Config.PATIENCE:
+            if bad >= config.PATIENCE:
                 print(f"  Early stop at epoch {epoch}")
                 break
     
@@ -935,119 +1068,316 @@ def train_model(X_train, y_train, X_val, y_val, input_dim, horizon, Config):
     
     return model, best_loss
 
-# main pipeline
-def main():
-    # Load
-    print("\n[1/4] Loading data...")
-    train_input_files = [Config.DATA_DIR / f"train/input_2023_w{w:02d}.csv" for w in range(1, 19)]
-    train_output_files = [Config.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
-    train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
-    train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
-    test_input = pd.read_csv(Config.DATA_DIR / "test_input.csv")
-    test_template = pd.read_csv(Config.DATA_DIR / "test.csv")
-    
-    # Prepare with advanced features
-    print("\n[2/4] Preparing with ADVANCED features...")
-    sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids = prepare_sequences_with_advanced_features(
-        train_input, train_output, is_training=True, window_size=Config.WINDOW_SIZE
-    )
-    
-    sequences = np.array(sequences, dtype=object)
-    targets_dx = np.array(targets_dx, dtype=object)
-    targets_dy = np.array(targets_dy, dtype=object)
-    
-    # Train
-    print("\n[3/4] Training with enhanced features...")
-    groups = np.array([d['game_id'] for d in sequence_ids])
-    gkf = GroupKFold(n_splits=Config.N_FOLDS)
-    
-    models_x, models_y, scalers = [], [], []
-    
-    for fold, (tr, va) in enumerate(gkf.split(sequences, groups=groups), 1):
-        print(f"\n{'='*60}")
-        print(f"Fold {fold}/{Config.N_FOLDS}")
-        print(f"{'='*60}")
-        
-        X_tr, X_va = sequences[tr], sequences[va]
-        
-        scaler = StandardScaler()
-        scaler.fit(np.vstack([s for s in X_tr]))
-        
-        X_tr_sc = np.stack([scaler.transform(s) for s in X_tr])
-        X_va_sc = np.stack([scaler.transform(s) for s in X_va])
-        
-        # Train X
-        print("Training X-axis model...")
-        mx, loss_x = train_model(
-            X_tr_sc, targets_dx[tr], X_va_sc, targets_dx[va],
-            X_tr[0].shape[-1], Config.MAX_FUTURE_HORIZON, Config
-        )
-        
-        # Train Y
-        print("Training Y-axis model...")
-        my, loss_y = train_model(
-            X_tr_sc, targets_dy[tr], X_va_sc, targets_dy[va],
-            X_tr[0].shape[-1], Config.MAX_FUTURE_HORIZON, Config
-        )
-        
-        models_x.append(mx)
-        models_y.append(my)
-        scalers.append(scaler)
-        
-        print(f"\nFold {fold} - X loss: {loss_x:.5f}, Y loss: {loss_y:.5f}")
-    
-    # Test predictions
-    print("\n[4/4] Creating test predictions...")
-    test_sequences, test_ids = prepare_sequences_with_advanced_features(
-        test_input, test_template=test_template, is_training=False, window_size=Config.WINDOW_SIZE
-    )
-    
-    X_test = np.array(test_sequences, dtype=object)
-    x_last = np.array([s[-1, 0] for s in X_test])
-    y_last = np.array([s[-1, 1] for s in X_test])
-    
-    # Ensemble predictions across folds
-    all_dx, all_dy = [], []
-    for mx, my, sc in zip(models_x, models_y, scalers):
-        X_sc = np.stack([sc.transform(s) for s in X_test])
-        X_t = torch.tensor(X_sc.astype(np.float32)).to(Config.DEVICE)
-        
-        mx.eval()
-        my.eval()
-        
-        with torch.no_grad():
-            all_dx.append(mx(X_t).cpu().numpy())
-            all_dy.append(my(X_t).cpu().numpy())
-    
-    ens_dx = np.mean(all_dx, axis=0)
-    ens_dy = np.mean(all_dy, axis=0)
-    
-    # Create submission
-    rows = []
-    H = ens_dx.shape[1]
-    
-    for i, sid in enumerate(test_ids):
-        fids = test_template[
-            (test_template['game_id'] == sid['game_id']) &
-            (test_template['play_id'] == sid['play_id']) &
-            (test_template['nfl_id'] == sid['nfl_id'])
-        ]['frame_id'].sort_values().tolist()
-        
-        for t, fid in enumerate(fids):
-            tt = min(t, H - 1)
-            px = np.clip(x_last[i] + ens_dx[i, tt], 0, 120)
-            py = np.clip(y_last[i] + ens_dy[i, tt], 0, 53.3)
-            
-            rows.append({
-                'id': f"{sid['game_id']}_{sid['play_id']}_{sid['nfl_id']}_{fid}",
-                'x': px,
-                'y': py
-            })
-    
-    submission = pd.DataFrame(rows)
-    submission.to_csv("submission.csv", index=False)
-    
-    return submission
+import kaggle_evaluation.nfl_inference_server
+import warnings
+import polars as pl # Import Polars for the predict function signature
 
-if __name__ == "__main__":
-    main()
+# Move all utility functions (get_velocity, height_to_feet, compute_geometric_endpoint, etc.)
+# and the Config/set_seed outside the class but above it, or make them static methods.
+
+class NFLPredictor:
+    def __init__(self):
+        warnings.filterwarnings('ignore')
+        config = Config() # Use the existing Config class
+        set_seed(config.SEED)
+        self.config = config
+
+        # If configured, try to load pre-saved artifacts to skip training and data prep
+        load_dir = Path(config.LOAD_DIR) if config.LOAD_DIR is not None else config.MODEL_DIR
+        artifacts_present = all((load_dir / f"model_fold{f}.pt").exists() for f in range(1, config.N_FOLDS + 1)) and (
+            (load_dir / "route_kmeans.pkl").exists() and (load_dir / "route_scaler.pkl").exists()
+        )
+
+        if config.LOAD_ARTIFACTS and artifacts_present:
+            print(f"\n[1/2] Loading trained artifacts from disk (from {load_dir})...")
+            self.models = []
+            self.scalers = []
+            # load route objects
+            try:
+                with open(load_dir / "route_kmeans.pkl", "rb") as f:
+                    self.route_kmeans = pickle.load(f)
+                with open(load_dir / "route_scaler.pkl", "rb") as f:
+                    self.route_scaler = pickle.load(f)
+            except Exception as e:
+                print("Failed to load route artifacts:", e)
+
+            # For input_dim, use a dummy array if needed
+            dummy_input_dim = 167  # fallback if not available
+            input_dim = dummy_input_dim
+            # Try to infer input_dim from scaler if possible
+            try:
+                with open(load_dir / "scaler_fold1.pkl", "rb") as f:
+                    scaler1 = pickle.load(f)
+                input_dim = scaler1.mean_.shape[0]
+            except Exception:
+                pass
+
+            for fold in range(1, config.N_FOLDS + 1):
+                model_path = load_dir / f"model_fold{fold}.pt"
+                scaler_path = load_dir / f"scaler_fold{fold}.pkl"
+
+                # load scaler
+                try:
+                    with open(scaler_path, "rb") as f:
+                        scaler = pickle.load(f)
+                except Exception:
+                    scaler = None
+
+                # instantiate model and load state
+                model = STTransformer(
+                        input_dim=input_dim,
+                        hidden_dim=config.HIDDEN_DIM,
+                        horizon=config.MAX_FUTURE_HORIZON,
+                        window_size=config.WINDOW_SIZE,
+                        n_heads=config.N_HEADS,
+                        n_layers=config.N_LAYERS).to(config.DEVICE)
+                try:
+                    state = torch.load(model_path, map_location='cpu')
+                    model.load_state_dict(state)
+                except Exception as e:
+                    print(f"Failed to load model fold {fold}:", e)
+
+                model.to(config.DEVICE)
+                model.eval()
+
+                self.models.append(model)
+                self.scalers.append(scaler)
+
+            print(f"✓ Loaded {len(self.models)} models and scalers from {load_dir}")
+            print("[2/2] Ready for inference. Skipped all training and data preparation.")
+            return
+
+        # If not loading, proceed with training and data preparation
+        # 1. Load Data
+        print("[1/4] Loading data for training...")
+        train_input_files = [config.DATA_DIR / f"train/input_2023_w{w:02d}.csv" for w in range(1, 19)]
+        train_output_files = [config.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
+        if Config.DEBUG:            
+            # Load a small amount of data to quickly get play IDs
+            sample_train_input = pd.read_csv(train_input_files[0])
+            sample_train_output = pd.read_csv(train_output_files[0])
+            # Get the first 100 unique plays (game_id, play_id combinations)
+            sample_plays = sample_train_output[['game_id', 'play_id']].drop_duplicates().head(100)
+            # Filter the full data for only these plays
+            train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
+            train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
+            # Perform the actual filtering to get a small, but complete, set of plays
+            train_input = train_input.merge(sample_plays, on=['game_id', 'play_id'], how='inner')
+            train_output = train_output.merge(sample_plays, on=['game_id', 'play_id'], how='inner')
+            print(f"✓ Reduced to {len(sample_plays)} unique plays.")
+        else:
+            train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
+            train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
+
+        # 2. Prepare Sequences and Train Feature Objects
+        print("\n[2/4] Preparing geometric sequences and feature scalers...")
+        result = prepare_sequences_geometric(
+            train_input, train_output, is_training=True, window_size=config.WINDOW_SIZE
+        )
+        sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids, geo_x, geo_y, route_kmeans, route_scaler = result
+
+        # Store feature objects for later inference
+        self.route_kmeans = route_kmeans
+        self.route_scaler = route_scaler
+        
+        sequences = list(sequences)
+        targets_dx = list(targets_dx)
+        targets_dy = list(targets_dy)
+
+        # Ensure model dir exists
+        config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+        # 3. Train Models
+        print("\n[3/4] Training geometric models...")
+        groups = np.array([d['game_id'] for d in sequence_ids])
+        gkf = GroupKFold(n_splits=config.N_FOLDS)
+
+        self.models, self.scalers = [], []
+        fold_losses = []
+        fold_rmses = []
+
+        for fold, (tr, va) in enumerate(gkf.split(sequences, groups=groups), 1):
+            # ... (rest of the fold training logic, exactly as in the original main()) ...
+            X_tr = [sequences[i] for i in tr]
+            X_va = [sequences[i] for i in va]
+            y_tr_dx = [targets_dx[i] for i in tr]
+            y_va_dx = [targets_dx[i] for i in va]
+            y_tr_dy = [targets_dy[i] for i in tr]
+            y_va_dy = [targets_dy[i] for i in va]
+            scaler = StandardScaler()
+            scaler.fit(np.vstack([s for s in X_tr]))
+            X_tr_sc = [scaler.transform(s) for s in X_tr]
+            X_va_sc = [scaler.transform(s) for s in X_va]
+            model, loss = train_model(
+                X_tr_sc, y_tr_dx, y_tr_dy,
+                X_va_sc, y_va_dx, y_va_dy,
+                X_tr[0].shape[-1], config.MAX_FUTURE_HORIZON, config
+            )
+            
+            # Compute validation RMSE
+            val_rmse = compute_val_rmse(
+                model, X_va_sc, y_va_dx, y_va_dy, 
+                config.MAX_FUTURE_HORIZON, config.DEVICE, config.BATCH_SIZE
+            )
+            
+            self.models.append(model)
+            self.scalers.append(scaler)
+            fold_losses.append(loss)
+            fold_rmses.append(val_rmse)
+            
+            print(f"\n✓ Fold {fold} - Loss: {loss:.5f}, Validation RMSE: {val_rmse:.5f}")
+            # Persist fold artifacts if requested
+            if config.SAVE_ARTIFACTS:
+                try:
+                    model_path = config.MODEL_DIR / f"model_fold{fold}.pt"
+                    scaler_path = config.MODEL_DIR / f"scaler_fold{fold}.pkl"
+                    # save model state dict on CPU to avoid device issues
+                    state = {k: v.cpu() for k, v in model.state_dict().items()}
+                    torch.save(state, str(model_path))
+                    with open(scaler_path, "wb") as f:
+                        pickle.dump(scaler, f)
+                    print(f"  Saved artifacts for fold {fold} -> {model_path.name}, {scaler_path.name}")
+                except Exception as e:
+                    print(f"  Warning: failed to save artifacts for fold {fold}:", e)
+
+        # Print summary statistics across all folds
+        print("\n" + "="*60)
+        print("CROSS-VALIDATION SUMMARY")
+        print("="*60)
+        avg_loss = np.mean(fold_losses)
+        std_loss = np.std(fold_losses)
+        avg_rmse = np.mean(fold_rmses)
+        std_rmse = np.std(fold_rmses)
+        
+        print(f"Average Loss:           {avg_loss:.5f} ± {std_loss:.5f}")
+        print(f"Average Validation RMSE: {avg_rmse:.5f} ± {std_rmse:.5f}")
+        print(f"\nPer-Fold Results:")
+        for i, (loss, rmse) in enumerate(zip(fold_losses, fold_rmses), 1):
+            print(f"  Fold {i}: Loss={loss:.5f}, RMSE={rmse:.5f}")
+        print("="*60 + "\n")
+
+        # Ensure all models are in eval mode (best practice)
+        # Optionally persist route clustering objects
+        if config.SAVE_ARTIFACTS:
+            try:
+                with open(config.MODEL_DIR / "route_kmeans.pkl", "wb") as f:
+                    pickle.dump(self.route_kmeans, f)
+                with open(config.MODEL_DIR / "route_scaler.pkl", "wb") as f:
+                    pickle.dump(self.route_scaler, f)
+                print(f"✓ Saved route artifacts -> route_kmeans.pkl, route_scaler.pkl")
+            except Exception as e:
+                print("Warning: failed to save route artifacts:", e)
+
+        for model in self.models:
+            model.eval()
+        print("\n🏆 Geometric Neural Breakthrough Model is ready for inference! 🏆")
+
+
+    def predict(self, test: pl.DataFrame, test_input: pl.DataFrame) -> pd.DataFrame:
+        """Inference function called by the API for each time step."""
+        
+        # Convert Polars DataFrames to Pandas, as the original notebook uses Pandas extensively
+        test_input_pd = test_input.to_pandas()
+        test_template_pd = test.to_pandas()
+
+        # --- 元データのプレイ方向（左/右）を保持（後で逆変換に使用） ---
+        flip_map = {}
+        flip_col = None
+        for cand in ['play_direction', 'playDirection']:
+            if cand in test_input_pd.columns:
+                flip_col = cand
+                break
+        if flip_col is not None:
+            left_by_play = (test_input_pd
+                            .groupby(['game_id', 'play_id'])[flip_col]
+                            .first()
+                            .astype(str).str.lower().str.startswith('l'))
+            flip_map = left_by_play.to_dict()
+        # -------------------------------------------------------------
+
+        # 1. Prepare Test Sequences（内部で右基準に統一 & play_direction を削除）
+        test_seq, test_ids, test_geo_x, test_geo_y = prepare_sequences_geometric(
+            test_input_pd, test_template=test_template_pd, is_training=False,
+            window_size=self.config.WINDOW_SIZE,
+            route_kmeans=self.route_kmeans, route_scaler=self.route_scaler
+        )
+
+        X_test = list(test_seq)
+        x_last = np.array([s[-1, 0] for s in X_test])
+        y_last = np.array([s[-1, 1] for s in X_test])
+
+        # 2. Ensemble Prediction
+        all_preds = []
+        H = self.config.MAX_FUTURE_HORIZON
+
+        for model, sc in zip(self.models, self.scalers):
+            X_sc = [sc.transform(s) for s in X_test]
+            X_t = torch.tensor(np.stack(X_sc).astype(np.float32)).to(self.config.DEVICE)
+
+            with torch.no_grad():
+                preds = model(X_t).cpu().numpy()
+
+            all_preds.append(preds)
+
+        ens_preds = np.mean(all_preds, axis=0)
+
+        # 3. Format Submission (逆変換: 左プレイは (x, y) -> (120-x, 53.3-y) で元座標に戻す)
+        rows = []
+        XMAX = self.config.FIELD_X_MAX
+        YMAX = self.config.FIELD_Y_MAX
+
+        for i, sid in enumerate(test_ids):
+            gid, pid = sid['game_id'], sid['play_id']
+            is_left = flip_map.get((gid, pid), False)
+
+            # The template DataFrame 'test' contains the info needed to map predictions
+            fids = test_template_pd[
+                (test_template_pd['game_id'] == gid) &
+                (test_template_pd['play_id'] == pid) &
+                (test_template_pd['nfl_id'] == sid['nfl_id'])
+            ]['frame_id'].sort_values().tolist()
+            
+            for t, fid in enumerate(fids):
+                tt = min(t, H - 1)
+                nx = np.clip(x_last[i] + ens_preds[i, tt, 0], 0, XMAX)
+                ny = np.clip(y_last[i] + ens_preds[i, tt, 1], 0, YMAX)
+
+                # 左プレイは元の座標系へ戻す
+                if is_left:
+                    px = XMAX - nx
+                    py = YMAX - ny
+                else:
+                    px = nx
+                    py = ny
+
+                rows.append({'x': px, 'y': py})
+
+        # The final returned DataFrame MUST only contain 'x' and 'y' columns, 
+        # matching the order of rows in the input 'test' DataFrame.
+        submission = pd.DataFrame(rows)
+        return submission
+
+# This must be outside the class and is what the API calls
+predictor = NFLPredictor()
+
+def predict(test: pl.DataFrame, test_input: pl.DataFrame) -> pl.DataFrame | pd.DataFrame:
+    """The function the API calls."""
+    return predictor.predict(test, test_input)
+
+# The NFLPredictor class and the 'predict' wrapper function (defined in step 1.1) must
+# be executed BEFORE this final block.
+
+inference_server = kaggle_evaluation.nfl_inference_server.NFLInferenceServer(predict)
+
+if os.getenv('KAGGLE_IS_COMPETITION_RERUN'):
+    # This runs when Kaggle evaluates your submission on the hidden test set
+    inference_server.serve()
+else:
+    # This runs when you run the notebook locally (e.g., in a Kaggle session)
+    # The original main() logic should be executed once in the __init__ of NFLPredictor
+    # to train and save the model/weights which would be loaded here in a real scenario.
+    # For this script, we'll run a local gateway with the training included in __init__.
+    # Note: The provided files are .csv, not the final directory structure, so this
+    # local run might require custom paths depending on the exact setup.
+    # Based on the demo, we use the provided structure:
+    inference_server.run_local_gateway(('/kaggle/input/nfl-big-data-bowl-2026-prediction/',))

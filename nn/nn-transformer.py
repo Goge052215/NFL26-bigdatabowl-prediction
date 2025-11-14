@@ -1,1145 +1,2637 @@
-# -------------------------------
-# FUSED TRANSFORMER: nn-gru2.py + nn-mps.py
-# Combines Transformer architecture with CNN preprocessing and advanced features
-# -------------------------------
-import os
-USE_CUDF = False
-try:
-    os.environ["CUDF_PANDAS_BACKEND"] = "cudf"
-    import pandas as pd
-    import numpy as np
-    import cupy as cp
-    USE_CUDF = True
-    print("using cuda_backend pandas for faster parallel data processing")
-except Exception:
-    print("cuda df not used")
-    import pandas as pd
-    import numpy as np
+# Leaderboard score: 0.562 RMSE
 
 import torch
 import torch.nn as nn
+import numpy as np
+import pandas as pd
 from pathlib import Path
 from tqdm.auto import tqdm
+import warnings
+import os
+import random
+import time
+import json
+import joblib
+from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import Manager, Queue
+
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GroupKFold
-from torch.utils.data import TensorDataset, DataLoader
-from torch.cuda.amp import autocast, GradScaler
-import warnings
-warnings.filterwarnings("ignore")
 
-# -------------------------------
-# Constants & helpers
-# -------------------------------
-YARDS_TO_METERS = 0.9144
-FPS = 10.0 
-FIELD_LENGTH, FIELD_WIDTH = 120.0, 53.3
+warnings.filterwarnings('ignore')
+
+# === Configuration ===
+
+class Config:
+    DATA_DIR = Path("/kaggle/input/nfl-big-data-bowl-2026-prediction")
+    OUTPUT_DIR = Path("./outputs")
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    MODEL_DIR = OUTPUT_DIR / "models"
+    MODEL_DIR.mkdir(exist_ok=True)
+    SAVE_DIR = MODEL_DIR
+    SAVE_ARTIFACTS = True
+    LOAD_ARTIFACTS = True
+    LOAD_DIR = os.environ.get("LOAD_DIR")
+    SKIP_TRAIN_IF_PRETRAINED = True
+    FORCE_TRAIN = os.environ.get("FORCE_TRAIN", "0") == "1"
+    AUTO_GENERATE_SUBMISSION_LOCAL = True
+    WRITE_SUBMISSION_PARQUET = True
+
+    TRAIN = True
+    SUBMIT = False
+    DEBUG = False
+    DEBUG_SIZE = 1
+
+    MAX_WORKER = min(8, os.cpu_count() or 1)
+    FEATURE_GROUPS = [
+        "target_alignment",
+        "lag",
+        "distance_rate",
+        "time",
+        "role",
+        "passer",
+        "curvature",
+        "route",
+        "receiver",
+        "neighbor_gnn",
+    ]
+    K_NEIGH = 3
+    RADIUS = 28.0
+    TAU = 8.0
+    SEEDS = [42]
+    N_FOLDS = 5
+    BATCH_SIZE = 256
+    EPOCHS = 200 if not DEBUG else 20
+    PATIENCE = 30
+    LEARNING_RATE = 1e-3
+    WINDOW_SIZE = 10
+    MAX_PLAYER = 9
+    HIDDEN_DIM = 128
+    MAX_FUTURE_HORIZON = 55
+    N_HEADS = 4
+    N_LAYERS = 2
+    MLP_HIDDEN_DIM = 256
+    N_RES_BLOCKS = 2
+    N_QUERYS = 3
+    ADD_BALL_TOKEN = True
+    USE_AXIAL_ATTENTION = True
+    DEVICE = torch.device(
+        "cuda" if torch.cuda.is_available() else (
+            "mps" if hasattr(torch.backends, "mps") 
+            and torch.backends.mps.is_available() else "cpu"
+        )
+    )
+    YARDS_TO_METERS = 0.9144
+    FPS = 10.0
+    FIELD_X_MIN, FIELD_X_MAX = 0.0, 120.0
+    FIELD_Y_MIN, FIELD_Y_MAX = 0.0, 53.3
+    USE_PLAY_PLAYER_INPUT = True
+
+# === Utilities ===
 
 def set_seed(seed=42):
-    import random
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
+    # Guard CUDA seed to avoid legacy GPU dependency
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+
+def load_input_output():
+    train_input_files = [
+        Config.DATA_DIR / f"train/input_2023_w{w:02d}.csv"
+        for w in range(1, 19 if not Config.DEBUG else 1 + Config.DEBUG_SIZE)
+    ]
+    train_output_files = [
+        Config.DATA_DIR / f"train/output_2023_w{w:02d}.csv"
+        for w in range(1, 19 if not Config.DEBUG else 1 + Config.DEBUG_SIZE)
+    ]
+    train_input = pd.concat(
+        [pd.read_csv(f) for f in train_input_files if f.exists()], ignore_index=True
+    )
+    train_output = pd.concat(
+        [pd.read_csv(f) for f in train_output_files if f.exists()], ignore_index=True
+    )
+
+    # Filter out outliers to better align CV with LB
+    # Ref: https://www.kaggle.com/competitions/nfl-big-data-bowl-2026-prediction/discussion/611647#3310487
+    bad_game_id = 2023091100
+    bad_play_id = 3167
+
+    before_in = len(train_input)
+    before_out = len(train_output)
+
+    train_input = train_input[
+        ~(
+            (train_input["game_id"] == bad_game_id)
+            & (train_input["play_id"] == bad_play_id)
+        )
+    ]
+    train_output = train_output[
+        ~(
+            (train_output["game_id"] == bad_game_id)
+            & (train_output["play_id"] == bad_play_id)
+        )
+    ]
+
+    print("Filtered input rows: ", before_in - len(train_input))
+    print("Filtered output rows: ", before_out - len(train_output))
+
+    return train_input, train_output
+
 
 def wrap_angle_deg(s):
+    # Map to (-180, 180]
     return ((s + 180.0) % 360.0) - 180.0
 
-def unify_left_direction(df: pd.DataFrame) -> pd.DataFrame:
-    """Mirror rightward plays so all samples are 'left' oriented."""
-    if 'play_direction' not in df.columns:
+
+def build_play_direction_map(df_in: pd.DataFrame) -> pd.Series:
+    return (
+        df_in[["game_id", "play_id", "play_direction"]]
+        .drop_duplicates()
+        .set_index(["game_id", "play_id"])["play_direction"]
+    )
+
+
+def unify_left_direction_ipt(df: pd.DataFrame) -> pd.DataFrame:
+    if "play_direction" not in df.columns:
         return df
+
     df = df.copy()
-    right = df['play_direction'].eq('right')
-    if 'x' in df.columns: df.loc[right, 'x'] = FIELD_LENGTH - df.loc[right, 'x']
-    if 'y' in df.columns: df.loc[right, 'y'] = FIELD_WIDTH  - df.loc[right, 'y']
-    for col in ('dir','o'):
+    right = df["play_direction"].eq("right")
+
+    if "x" in df.columns:
+        df.loc[right, "x"] = Config.FIELD_X_MAX - df.loc[right, "x"]
+    if "y" in df.columns:
+        df.loc[right, "y"] = Config.FIELD_Y_MAX - df.loc[right, "y"]
+
+    if "ball_land_x" in df.columns:
+        df.loc[right, "ball_land_x"] = Config.FIELD_X_MAX - df.loc[right, "ball_land_x"]
+    if "ball_land_y" in df.columns:
+        df.loc[right, "ball_land_y"] = Config.FIELD_Y_MAX - df.loc[right, "ball_land_y"]
+
+    for col in ("dir", "o"):
         if col in df.columns:
-            df.loc[right, col] = (df.loc[right, col] + 180.0) % 360.0
-    if 'ball_land_x' in df.columns:
-        df.loc[right, 'ball_land_x'] = FIELD_LENGTH - df.loc[right, 'ball_land_x']
-    if 'ball_land_y' in df.columns:
-        df.loc[right, 'ball_land_y'] = FIELD_WIDTH  - df.loc[right, 'ball_land_y']
+            df.loc[right, col] = (df.loc[right, col].astype(float) + 180.0) % 360.0
+
     return df
 
+
+def unify_left_direction_opt(df: pd.DataFrame, dir_map: dict) -> pd.DataFrame:
+    df["play_direction"] = df.apply(
+        lambda r: dir_map.get((r["game_id"], r["play_id"])), axis=1
+    )
+    right = df["play_direction"].eq("right")
+
+    if "x" in df.columns:
+        df.loc[right, "x"] = Config.FIELD_X_MAX - df.loc[right, "x"]
+    if "y" in df.columns:
+        df.loc[right, "y"] = Config.FIELD_Y_MAX - df.loc[right, "y"]
+
+    df.drop(columns=["play_direction"], inplace=True)
+
+    return df
+
+
 def invert_to_original_direction(x_u, y_u, play_dir_right: bool):
-    """Invert unified coordinates back to original play direction."""
+    """Invert unified (left) coordinates back to original play direction."""
     if not play_dir_right:
         return float(x_u), float(y_u)
-    return float(FIELD_LENGTH - x_u), float(FIELD_WIDTH - y_u)
+    return float(Config.FIELD_X_MAX - x_u), float(Config.FIELD_Y_MAX - y_u)
 
-# -------------------------------
-# Fused Config (best from both models)
-# -------------------------------
-class Config:
-    DATA_DIR = Path("/kaggle/input/nfl-big-data-bowl-2026-prediction")
-    OUTPUT_DIR = Path("./outputs"); OUTPUT_DIR.mkdir(exist_ok=True)
 
-    SEED = 42
-    N_FOLDS = 4  # From nn-gru2.py for faster training
-    BATCH_SIZE = 256
-    EPOCHS = 200
-    PATIENCE = 30  # From nn-gru2.py (more conservative)
-    LEARNING_RATE = 4e-4  # From nn-mps.py (higher LR)
+def _seed_dir(base_dir: Path, seed: int) -> Path:
+    d = base_dir / f"seed_{seed}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
-    WINDOW_SIZE = 10  # From nn-gru2.py (longer context)
-    HIDDEN_DIM = 128  # From nn-gru2.py (balanced)
-    MAX_FUTURE_HORIZON = 124  # From nn-mps.py (latest tested value)
 
-    # Transformer hyperparameters (optimized fusion)
-    D_MODEL = 128
-    N_HEADS = 4
-    N_LAYERS = 2
-    DROPOUT = 0.1
+def save_fold_artifacts_stt(
+    seed: int, fold: int, scaler, model: nn.Module, base_dir: Path
+):
+    sdir = _seed_dir(base_dir, seed)
+    joblib.dump(scaler, sdir / f"scaler_fold{fold}.pkl")
+    torch.save(model.state_dict(), sdir / f"model_fold{fold}.pt")
 
-    # GNN-lite parameters (from nn-mps.py)
-    K_NEIGH = 5
-    RADIUS = 15.0
-    TAU = 6.0
 
-    DEVICE = torch.device("mps" if torch.backends.mps.is_available() else 
-                         ("cuda" if torch.cuda.is_available() else "cpu"))
+def write_meta(feature_cols: list, base_dir: Path):
+    # Ensure the base directory exists before writing metadata
+    base_dir.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "seeds": Config.SEEDS,
+        "n_folds": Config.N_FOLDS,
+        "feature_cols": feature_cols,
+        "window_size": Config.WINDOW_SIZE,
+        "feature_groups": Config.FEATURE_GROUPS,
+        "version": 1,
+    }
+    with open(base_dir / "meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"[META] wrote meta.json to {base_dir}")
 
-set_seed(Config.SEED)
 
-# -------------------------------
-# GNN-lite processor (from nn-mps.py)
-# -------------------------------
-class GNNLiteProcessor:
-    def compute_neighbor_embeddings(self, input_df: pd.DataFrame) -> pd.DataFrame:
-        cols_needed = ["game_id","play_id","nfl_id","frame_id","x","y",
-                       "velocity_x","velocity_y","player_side"]
-        src = input_df[cols_needed].copy()
-
-        last = (src.sort_values(["game_id","play_id","nfl_id","frame_id"])
-                   .groupby(["game_id","play_id","nfl_id"], as_index=False)
-                   .tail(1)
-                   .rename(columns={"frame_id":"last_frame_id"})
-                   .reset_index(drop=True))
-
-        tmp = last.merge(
-            src.rename(columns={
-                "frame_id":"nb_frame_id", "nfl_id":"nfl_id_nb",
-                "x":"x_nb", "y":"y_nb",
-                "velocity_x":"vx_nb", "velocity_y":"vy_nb",
-                "player_side":"player_side_nb"
-            }),
-            left_on=["game_id","play_id","last_frame_id"],
-            right_on=["game_id","play_id","nb_frame_id"],
-            how="left",
+def write_cv_log(cv_log: list, all_rmse: list):
+    # Ensure the save directory exists before writing CV metrics
+    Config.SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(Config.SAVE_DIR / "cv_metrics.json", "w") as f:
+        json.dump(
+            {
+                "per_fold": cv_log,
+                "overall_mean_perdim": float(np.mean(all_rmse)),
+            },
+            f,
+            indent=2,
         )
+    print(f"\nCV metrics written to {Config.SAVE_DIR / 'cv_metrics.json'}")
 
-        tmp = tmp[tmp["nfl_id_nb"] != tmp["nfl_id"]]
-        tmp["dx"]  = tmp["x_nb"] - tmp["x"]
-        tmp["dy"]  = tmp["y_nb"] - tmp["y"]
-        tmp["dvx"] = tmp["vx_nb"] - tmp["velocity_x"]
-        tmp["dvy"] = tmp["vy_nb"] - tmp["velocity_y"]
-        tmp["dist"] = np.sqrt(tmp["dx"]**2 + tmp["dy"]**2)
 
-        tmp = tmp[np.isfinite(tmp["dist"])]
-        tmp = tmp[tmp["dist"] > 1e-6]
-        if Config.RADIUS is not None:
-            tmp = tmp[tmp["dist"] <= Config.RADIUS]
+def load_saved_ensemble_stt(base_dir: Path, model_class: torch.nn.Module):
+    meta_path = base_dir / "meta.json"
+    assert meta_path.exists(), f"meta.json not found: {meta_path}"
+    with open(meta_path, "r") as f:
+        meta = json.load(f)
 
-        tmp["is_ally"] = (tmp["player_side_nb"].fillna("") == tmp["player_side"].fillna("")).astype(np.float32)
+    feature_cols = meta["feature_cols"]
+    seeds = meta["seeds"]
+    n_folds = int(meta["n_folds"])
 
-        keys = ["game_id","play_id","nfl_id"]
-        tmp["rnk"] = tmp.groupby(keys)["dist"].rank(method="first")
-        if Config.K_NEIGH is not None:
-            tmp = tmp[tmp["rnk"] <= float(Config.K_NEIGH)]
+    models, scalers = [], []
+    for seed in seeds:
+        sdir = base_dir / f"seed_{seed}"
+        for fold in range(1, n_folds + 1):
+            sc_path = sdir / f"scaler_fold{fold}.pkl"
+            model_path = sdir / f"model_fold{fold}.pt"
+            if not (sc_path.exists() and model_path.exists()):
+                print(f"[WARN] missing seed={seed} fold={fold}, skip")
+                continue
+            scaler = joblib.load(sc_path)
+            m = model_class(len(feature_cols)).to(Config.DEVICE)
+            m.load_state_dict(torch.load(model_path, map_location=Config.DEVICE))
+            m.eval()
+            scalers.append(scaler)
+            models.append(m)
 
-        tmp["w"] = np.exp(-tmp["dist"] / float(Config.TAU))
-        sum_w = tmp.groupby(keys)["w"].transform("sum")
-        tmp["wn"] = np.where(sum_w > 0, tmp["w"]/sum_w, 0.0)
+    return models, scalers, meta
 
-        tmp["wn_ally"] = tmp["wn"] * tmp["is_ally"]
-        tmp["wn_opp"]  = tmp["wn"] * (1.0 - tmp["is_ally"])
 
-        for col in ["dx","dy","dvx","dvy"]:
-            tmp[f"{col}_ally_w"] = tmp[col] * tmp["wn_ally"]
-            tmp[f"{col}_opp_w"]  = tmp[col] * tmp["wn_opp"]
+def prepare_targets_stt(batch_dx, batch_dy, max_h):
+    tensors_x, tensors_y, masks = [], [], []
 
-        tmp["dist_ally"] = np.where(tmp["is_ally"] > 0.5, tmp["dist"], np.nan)
-        tmp["dist_opp"]  = np.where(tmp["is_ally"] < 0.5, tmp["dist"], np.nan)
+    for dx, dy in zip(batch_dx, batch_dy):
+        L = len(dx)
+        padded_x = np.pad(dx, (0, max_h - L), constant_values=0).astype(np.float32)
+        padded_y = np.pad(dy, (0, max_h - L), constant_values=0).astype(np.float32)
+        mask = np.zeros(max_h, dtype=np.float32)
+        mask[:L] = 1.0
 
-        ag = tmp.groupby(keys).agg(
-            gnn_ally_dx_mean = ("dx_ally_w", "sum"),
-            gnn_ally_dy_mean = ("dy_ally_w", "sum"),
-            gnn_ally_dvx_mean= ("dvx_ally_w","sum"),
-            gnn_ally_dvy_mean= ("dvy_ally_w","sum"),
-            gnn_opp_dx_mean  = ("dx_opp_w",  "sum"),
-            gnn_opp_dy_mean  = ("dy_opp_w",  "sum"),
-            gnn_opp_dvx_mean = ("dvx_opp_w", "sum"),
-            gnn_opp_dvy_mean = ("dvy_opp_w", "sum"),
-            gnn_ally_cnt     = ("is_ally",   "sum"),
-            gnn_opp_cnt      = ("is_ally",   lambda s: float(len(s) - s.sum())),
-            gnn_ally_dmin    = ("dist_ally", "min"),
-            gnn_ally_dmean   = ("dist_ally", "mean"),
-            gnn_opp_dmin     = ("dist_opp",  "min"),
-            gnn_opp_dmean    = ("dist_opp",  "mean"),
-        ).reset_index()
+        tensors_x.append(torch.tensor(padded_x))
+        tensors_y.append(torch.tensor(padded_y))
+        masks.append(torch.tensor(mask))
 
-        near = tmp.loc[tmp["rnk"]<=3, keys+["rnk","dist"]].copy()
-        near["rnk"] = near["rnk"].astype(int)
-        dwide = near.pivot_table(index=keys, columns="rnk", values="dist", aggfunc="first")
-        dwide = dwide.rename(columns={1:"gnn_d1",2:"gnn_d2",3:"gnn_d3"}).reset_index()
-        ag = ag.merge(dwide, on=keys, how="left")
+    targets = torch.stack([torch.stack(tensors_x), torch.stack(tensors_y)], dim=-1)
+    return targets, torch.stack(masks)
 
-        for c in ["gnn_ally_dx_mean","gnn_ally_dy_mean","gnn_ally_dvx_mean","gnn_ally_dvy_mean",
-                  "gnn_opp_dx_mean","gnn_opp_dy_mean","gnn_opp_dvx_mean","gnn_opp_dvy_mean"]:
-            ag[c] = ag[c].fillna(0.0)
-        for c in ["gnn_ally_cnt","gnn_opp_cnt"]:
-            ag[c] = ag[c].fillna(0.0)
-        for c in ["gnn_ally_dmin","gnn_opp_dmin","gnn_ally_dmean","gnn_opp_dmean","gnn_d1","gnn_d2","gnn_d3"]:
-            ag[c] = ag[c].fillna(Config.RADIUS if Config.RADIUS is not None else 30.0)
 
-        return ag
-
-# -------------------------------
-# Fused Feature Engineering (best from both)
-# -------------------------------
-def height_to_feet(height_str):
-    try:
-        ft, inches = map(int, str(height_str).split('-'))
-        return ft + inches / 12
-    except Exception:
-        return 6.0
-
+# === Feature Engineering ===
 class FeatureEngineer:
-    """Fused feature engineering from both models."""
-    def __init__(self, feature_groups_to_create):
-        self.gcols = ['game_id', 'play_id', 'nfl_id']
+    """
+    Modular, ablation-friendly feature builder.
+    """
+
+    def __init__(self, feature_groups_to_create: list):
+        self.gcols = ["game_id", "play_id", "nfl_id"]
         self.active_groups = feature_groups_to_create
+        # Map feature groups to (function, interactive flag)
+        # interactive = True: feature requires information from other players
+        # interactive = False: can be computed using only the local subset of input_df
         self.feature_creators = {
-            'distance_rate': self._create_distance_rate_features,
-            'target_alignment': self._create_target_alignment_features,
-            'multi_window_rolling': self._create_multi_window_rolling_features,
-            'extended_lags': self._create_extended_lag_features,
-            'velocity_changes': self._create_velocity_change_features,
-            'field_position': self._create_field_position_features,
-            'role_specific': self._create_role_specific_features,
-            'time_features': self._create_time_features,
-            'jerk_features': self._create_jerk_features,
-            'curvature_land_features': self._create_curvature_land_features,
-            'player_interaction_distance': self._create_player_interaction_distance_features,
+            "target_alignment": (self._create_target_alignment_features, False),
+            "multi_window": (self._create_multi_window_features, False),
+            "lag": (self._create_extended_lag_features, False),
+            "motion_change": (self._create_motion_change_features, False),
+            "field_position": (self._create_field_position_features, False),
+            "distance_rate": (self._create_distance_rate_features, False),
+            "geometric": (self._create_geometric_features, False),
+            "neighbor_gnn": (self._create_neighbor_features, True),
+            "time": (self._create_time_features, False),
+            "role": (self._create_role_features, False),
+            "passer": (self._create_passer_features, True),
+            "curvature": (self._create_curvature_features, False),
+            "route": (self._create_route_features, False),
+            "receiver": (self._create_receiver_features, True),
         }
         self.created_feature_cols = []
 
-    def _create_basic_features(self, df):
-        print("Step 1/4: Adding basic features...")
-        df = df.copy()
-        df['player_height_feet'] = df['player_height'].apply(height_to_feet)
+    def _height_to_feet(self, height_str):
+        try:
+            ft, inches = map(int, str(height_str).split("-"))
+            return ft + inches / 12
+        except Exception:
+            return 6.0
 
-        # Kinematics (from nn-gru2.py - more accurate)
-        dir_rad = np.deg2rad(df['dir'].fillna(0.0).astype('float32'))
-        df['velocity_x']     = df['s'] * np.cos(dir_rad)
-        df['velocity_y']     = df['s'] * np.sin(dir_rad)
-        df['acceleration_x'] = df['a'] * np.cos(dir_rad)
-        df['acceleration_y'] = df['a'] * np.sin(dir_rad)
+    def _mirror_angle(self, df: pd.DataFrame, cols: list):
+        for col in cols:
+            df[col] = (450 - df[col]) % 360
+        return df
 
-        # Roles
-        df['is_offense']  = (df['player_side'] == 'Offense').astype(np.int8)
-        df['is_defense']  = (df['player_side'] == 'Defense').astype(np.int8)
-        df['is_receiver'] = (df['player_role'] == 'Targeted Receiver').astype(np.int8)
-        df['is_coverage'] = (df['player_role'] == 'Defensive Coverage').astype(np.int8)
-        df['is_passer']   = (df['player_role'] == 'Passer').astype(np.int8)
+    def _warp_angle(self, df: pd.DataFrame, col: str):
+        return np.minimum(df[col], 360 - df[col])
 
-        # Physics (from nn-gru2.py - more consistent units)
-        mass_kg = df['player_weight'].fillna(200.0) / 2.20462
-        v_ms = df['s'] * YARDS_TO_METERS
-        df['momentum_x'] = mass_kg * df['velocity_x'] * YARDS_TO_METERS
-        df['momentum_y'] = mass_kg * df['velocity_y'] * YARDS_TO_METERS
-        df['kinetic_energy'] = 0.5 * mass_kg * (v_ms ** 2)
+    def _create_basic_features(self, df: pd.DataFrame):
+        """Simple derived features from original columns"""
+        # Convert angle from dataset convention to standard Cartesian coordinates
+        angle_cols = ["dir", "o"]
+        df = self._mirror_angle(df, angle_cols)
 
-        # Ball features
-        if {'ball_land_x','ball_land_y'}.issubset(df.columns):
-            ball_dx = df['ball_land_x'] - df['x']
-            ball_dy = df['ball_land_y'] - df['y']
-            dist = np.hypot(ball_dx, ball_dy)
-            df['distance_to_ball'] = dist
-            inv = 1.0 / (dist + 1e-6)
-            df['ball_direction_x'] = ball_dx * inv
-            df['ball_direction_y'] = ball_dy * inv
-            df['closing_speed'] = (
-                df['velocity_x'] * df['ball_direction_x'] +
-                df['velocity_y'] * df['ball_direction_y']
-            )
+        # Height & Weight & BMI
+        df["player_height_feet"] = df["player_height"].apply(self._height_to_feet)
+        height_parts = df["player_height"].str.split("-", expand=True)
+        df["height_inches"] = height_parts[0].astype(float) * 12 + height_parts[
+            1
+        ].astype(float)
+        df["bmi"] = (df["player_weight"] / (df["height_inches"] ** 2)) * 703
+
+        # Velocity & Acceleration & Momentum
+        dir_rad = np.deg2rad(df["dir"].fillna(0))
+        df["velocity_x"] = df["s"] * np.cos(dir_rad)
+        df["velocity_y"] = df["s"] * np.sin(dir_rad)
+        # NOTE: acceleration_x/y may be incorrect
+        df["acceleration_x"] = df["a"] * np.cos(dir_rad)
+        df["acceleration_y"] = df["a"] * np.sin(dir_rad)
+
+        df["momentum_x"] = df["velocity_x"] * df["player_weight"]
+        df["momentum_y"] = df["velocity_y"] * df["player_weight"]
+        df["speed_squared"] = df["s"] ** 2
+        df["kinetic_energy"] = 0.5 * df["player_weight"] * df["speed_squared"]
+
+        # TODO: Consider direction
+        df["orientation_diff"] = np.abs(df["o"] - df["dir"])
+        df["orientation_diff"] = self._warp_angle(df, "orientation_diff")
+
+        # Play direction (1 = left, 0 = right)
+        df["play_direction"] = (df["play_direction"] == "left").astype(int)
+
+        # Player side
+        df["is_offense"] = (df["player_side"] == "Offense").astype(int)
+        df["is_defense"] = (df["player_side"] == "Defense").astype(int)
+        # Player role
+        df["is_receiver"] = (df["player_role"] == "Targeted Receiver").astype(int)
+        df["is_coverage"] = (df["player_role"] == "Defensive Coverage").astype(int)
+        df["is_passer"] = (df["player_role"] == "Passer").astype(int)
+
+        # Ball
+        ball_dx = df["ball_land_x"] - df["x"]
+        ball_dy = df["ball_land_y"] - df["y"]
+        df["distance_to_ball"] = np.sqrt(ball_dx**2 + ball_dy**2)
+        df["angle_to_ball"] = np.arctan2(ball_dy, ball_dx)
+        df["ball_direction_x"] = ball_dx / (df["distance_to_ball"] + 1e-6)
+        df["ball_direction_y"] = ball_dy / (df["distance_to_ball"] + 1e-6)
+        df["angle_diff"] = np.abs(df["o"] - np.degrees(df["angle_to_ball"]))
+        df["angle_diff"] = self._warp_angle(df, "angle_diff")
+        df["closing_speed"] = (
+            df["velocity_x"] * df["ball_direction_x"]
+            + df["velocity_y"] * df["ball_direction_y"]
+        )
 
         base = [
-            'x','y','s','a','o','dir','frame_id','ball_land_x','ball_land_y',
-            'player_height_feet','player_weight',
-            'velocity_x','velocity_y','acceleration_x','acceleration_y',
-            'momentum_x','momentum_y','kinetic_energy',
-            'is_offense','is_defense','is_receiver','is_coverage','is_passer',
-            'distance_to_ball','ball_direction_x','ball_direction_y','closing_speed'
+            # Original
+            "x",
+            "y",
+            "s",
+            "a",
+            "o",
+            "dir",
+            "frame_id",
+            "ball_land_x",
+            "ball_land_y",
+            "player_weight",
+            # Derived
+            "player_height_feet",
+            "bmi",
+            "velocity_x",
+            "velocity_y",
+            "acceleration_x",
+            "acceleration_y",
+            "momentum_x",
+            "momentum_y",
+            "speed_squared",
+            "kinetic_energy",
+            "orientation_diff",
+            # "play_direction",
+            "is_offense",
+            "is_defense",
+            "is_receiver",
+            "is_coverage",
+            "is_passer",
+            "distance_to_ball",
+            "angle_to_ball",
+            "ball_direction_x",
+            "ball_direction_y",
+            "angle_diff",
+            "closing_speed",
         ]
         self.created_feature_cols.extend([c for c in base if c in df.columns])
         return df
 
-    def _create_distance_rate_features(self, df):
+    def _create_target_alignment_features(self, df: pd.DataFrame):
+        """
+        Compute alignment features between a player's movement vector and the ball's direction.
+
+        These features describe how the player's motion aligns with the target (ball) and can help
+        predict actions such as approaching, intercepting, or moving away from the ball.
+        """
         new_cols = []
-        if 'distance_to_ball' in df.columns:
-            d = df.groupby(self.gcols)['distance_to_ball'].diff()
-            df['d2ball_dt']  = d.fillna(0.0) * FPS
-            df['d2ball_ddt'] = df.groupby(self.gcols)['d2ball_dt'].diff().fillna(0.0) * FPS
-            df['time_to_intercept'] = (df['distance_to_ball'] /
-                                       (df['d2ball_dt'].abs() + 1e-3)).clip(0, 10)
-            new_cols = ['d2ball_dt','d2ball_ddt','time_to_intercept']
-        return df, new_cols
-
-    def _create_target_alignment_features(self, df):
-        new_cols = []
-        if {'ball_direction_x','ball_direction_y','velocity_x','velocity_y'}.issubset(df.columns):
-            df['velocity_alignment'] = df['velocity_x']*df['ball_direction_x'] + df['velocity_y']*df['ball_direction_y']
-            df['velocity_perpendicular'] = df['velocity_x']*(-df['ball_direction_y']) + df['velocity_y']*df['ball_direction_x']
-            new_cols.extend(['velocity_alignment','velocity_perpendicular'])
-            if {'acceleration_x','acceleration_y'}.issubset(df.columns):
-                df['accel_alignment'] = df['acceleration_x']*df['ball_direction_x'] + df['acceleration_y']*df['ball_direction_y']
-                new_cols.append('accel_alignment')
-        return df, new_cols
-
-    def _create_multi_window_rolling_features(self, df):
-        new_cols = []
-        for window in (3, 5, 10):
-            for col in ('velocity_x','velocity_y','s','a'):
-                if col in df.columns:
-                    r_mean = df.groupby(self.gcols)[col].rolling(window, min_periods=1).mean()
-                    r_std  = df.groupby(self.gcols)[col].rolling(window, min_periods=1).std()
-                    r_mean = r_mean.reset_index(level=list(range(len(self.gcols))), drop=True)
-                    r_std  = r_std.reset_index(level=list(range(len(self.gcols))), drop=True)
-                    df[f'{col}_roll{window}'] = r_mean
-                    df[f'{col}_std{window}']  = r_std.fillna(0.0)
-                    new_cols.extend([f'{col}_roll{window}', f'{col}_std{window}'])
-        return df, new_cols
-
-    def _create_extended_lag_features(self, df):
-        new_cols = []
-        for lag in (1,2,3,4,5):
-            for col in ('x','y','velocity_x','velocity_y'):
-                if col in df.columns:
-                    g = df.groupby(self.gcols)[col]
-                    lagv = g.shift(lag)
-                    df[f'{col}_lag{lag}'] = lagv.fillna(g.transform('first'))
-                    new_cols.append(f'{col}_lag{lag}')
-        return df, new_cols
-
-    def _create_velocity_change_features(self, df):
-        new_cols = []
-        if 'velocity_x' in df.columns:
-            df['velocity_x_change'] = df.groupby(self.gcols)['velocity_x'].diff().fillna(0.0)
-            df['velocity_y_change'] = df.groupby(self.gcols)['velocity_y'].diff().fillna(0.0)
-            df['speed_change']      = df.groupby(self.gcols)['s'].diff().fillna(0.0)
-            d = df.groupby(self.gcols)['dir'].diff().fillna(0.0)
-            df['direction_change']  = wrap_angle_deg(d)
-            new_cols = ['velocity_x_change','velocity_y_change','speed_change','direction_change']
-        return df, new_cols
-
-    def _create_field_position_features(self, df):
-        df['dist_from_left'] = df['y']
-        df['dist_from_right'] = FIELD_WIDTH - df['y']
-        df['dist_from_sideline'] = np.minimum(df['dist_from_left'], df['dist_from_right'])
-        df['dist_from_endzone']  = np.minimum(df['x'], FIELD_LENGTH - df['x'])
-        return df, ['dist_from_sideline','dist_from_endzone']
-
-    def _create_role_specific_features(self, df):
-        new_cols = []
-        if {'is_receiver','velocity_alignment'}.issubset(df.columns):
-            df['receiver_optimality'] = df['is_receiver'] * df['velocity_alignment']
-            df['receiver_deviation']  = df['is_receiver'] * np.abs(df.get('velocity_perpendicular', 0.0))
-            new_cols.extend(['receiver_optimality','receiver_deviation'])
-        if {'is_coverage','closing_speed'}.issubset(df.columns):
-            df['defender_closing_speed'] = df['is_coverage'] * df['closing_speed']
-            new_cols.append('defender_closing_speed')
-        return df, new_cols
-
-    def _create_time_features(self, df):
-        df['frames_elapsed']  = df.groupby(self.gcols).cumcount()
-        df['normalized_time'] = df.groupby(self.gcols)['frames_elapsed'].transform(
-            lambda x: x / (x.max() + 1e-9)
-        )
-        return df, ['frames_elapsed','normalized_time']
-
-    def _create_jerk_features(self, df):
-        new_cols = []
-        if 'a' in df.columns:
-            df['jerk'] = df.groupby(self.gcols)['a'].diff().fillna(0.0) * FPS
-            new_cols.append('jerk')
-        if {'acceleration_x','acceleration_y'}.issubset(df.columns):
-            df['jerk_x'] = df.groupby(self.gcols)['acceleration_x'].diff().fillna(0.0) * FPS
-            df['jerk_y'] = df.groupby(self.gcols)['acceleration_y'].diff().fillna(0.0) * FPS
-            new_cols.extend(['jerk_x','jerk_y'])
-        return df, new_cols
-
-    def _create_curvature_land_features(self, df):
-        """Advanced curvature and ball landing features from nn-gru2.py."""
-        new_cols = []
-        
-        if {'ball_land_x','ball_land_y'}.issubset(df.columns):
-            dx = df['ball_land_x'] - df['x']
-            dy = df['ball_land_y'] - df['y']
-            bearing = np.arctan2(dy, dx)
-            a_dir = np.deg2rad(df['dir'].fillna(0.0).values)
-            # Signed bearing difference
-            df['bearing_to_land_signed'] = np.rad2deg(np.arctan2(np.sin(bearing - a_dir), np.cos(bearing - a_dir)))
-            # Lateral offset: d × u (2D cross, z component)
-            ux, uy = np.cos(a_dir), np.sin(a_dir)
-            df['land_lateral_offset'] = dy*ux - dx*uy  # >0 landing point on left side
-    
-        # Curvature (by sequence)
-        ddir = df.groupby(self.gcols)['dir'].diff().fillna(0.0)
-        ddir = ((ddir + 180.0) % 360.0) - 180.0
-        curvature = np.deg2rad(ddir).astype('float32') / (df['s'].replace(0, np.nan).astype('float32') * 0.1 + 1e-6)
-        df['curvature_signed'] = curvature.fillna(0.0)
-        df['curvature_abs'] = df['curvature_signed'].abs()
-    
-        # Window averages (3/5)
-        for w in (3,5):
-            r = df.groupby(self.gcols)['curvature_signed'].rolling(w, min_periods=1).mean().reset_index(level=[0,1,2], drop=True)
-            df[f'curv_signed_roll{w}'] = r
-            r2 = df.groupby(self.gcols)['curvature_abs'].rolling(w, min_periods=1).mean().reset_index(level=[0,1,2], drop=True)
-            df[f'curv_abs_roll{w}'] = r2
-    
-        new_cols = ['bearing_to_land_signed','land_lateral_offset',
-                    'curvature_signed','curvature_abs','curv_signed_roll3','curv_abs_roll3',
-                    'curv_signed_roll5','curv_abs_roll5']
-        return df, [c for c in new_cols if c in df.columns]
-
-    def _create_player_interaction_distance_features(self, df):
-        """Optimized player interaction features from nn-mps.py."""
-        new_cols = []
-        
-        if not {'x', 'y', 'velocity_x', 'velocity_y', 'is_offense'}.issubset(df.columns):
+        if not {"ball_direction_x", "ball_direction_y"}.issubset(df.columns):
             return df, new_cols
-        
-        grouped_features = []
-        for (gid, pid, fid), frame_df in df.groupby(['game_id', 'play_id', 'frame_id']):
-            frame_df = frame_df.copy()
-            
-            positions = frame_df[['x', 'y']].values.astype(np.float32)
-            velocities = frame_df[['velocity_x', 'velocity_y']].values.astype(np.float32)
-            is_offense = frame_df['is_offense'].values
-            
-            n_players = len(frame_df)
-            
-            from scipy.spatial.distance import cdist
-            dist_matrix = cdist(positions, positions, metric='euclidean').astype(np.float32)
-            np.fill_diagonal(dist_matrix, np.inf)
-            
-            is_opponent_matrix = is_offense[:, np.newaxis] != is_offense[np.newaxis, :]
-            is_teammate_matrix = (is_offense[:, np.newaxis] == is_offense[np.newaxis, :]) & (np.arange(n_players)[:, None] != np.arange(n_players))
-            
-            opponent_dists = np.where(is_opponent_matrix, dist_matrix, np.inf)
-            teammate_dists = np.where(is_teammate_matrix, dist_matrix, np.inf)
-            
-            min_opponent_dist = np.minimum(np.min(opponent_dists, axis=1), 999.0)
-            min_teammate_dist = np.minimum(np.min(teammate_dists, axis=1), 999.0)
-            
-            opponent_density = np.sum((opponent_dists < 5.0), axis=1).astype(np.int8)
-            teammate_density = np.sum((teammate_dists < 5.0), axis=1).astype(np.int8)
-            
-            nearest_opponent_idx = np.argmin(opponent_dists, axis=1)
-            valid_mask = min_opponent_dist < 20.0
-            
-            vel_diff = velocities - velocities[nearest_opponent_idx]
-            pos_diff = positions[nearest_opponent_idx] - positions
-            
-            relative_velocity = np.sum(vel_diff * pos_diff, axis=1) / (min_opponent_dist + 1e-6)
-            relative_velocity = np.where(valid_mask, relative_velocity, 0.0).astype(np.float32)
-            
-            frame_df['min_opponent_distance'] = min_opponent_dist
-            frame_df['min_teammate_distance'] = min_teammate_dist
-            frame_df['relative_velocity_to_nearest_opponent'] = relative_velocity
-            frame_df['opponent_density_5yd'] = opponent_density
-            frame_df['teammate_density_5yd'] = teammate_density
-            
-            grouped_features.append(frame_df)
-        
-        result_df = pd.concat(grouped_features, ignore_index=True)
-        
-        new_cols = [
-            'min_opponent_distance',
-            'min_teammate_distance', 
-            'relative_velocity_to_nearest_opponent',
-            'opponent_density_5yd',
-            'teammate_density_5yd'
-        ]
-        
-        return result_df, new_cols
 
-    def transform(self, df):
-        df = df.copy().sort_values(['game_id','play_id','nfl_id','frame_id'])
+        # Velocity
+        if {"velocity_x", "velocity_y"}.issubset(df.columns):
+            df["velocity_alignment"] = (
+                df["velocity_x"] * df["ball_direction_x"]
+                + df["velocity_y"] * df["ball_direction_y"]
+            )
+            df["velocity_perpendicular"] = (
+                df["velocity_x"] * (-df["ball_direction_y"])
+                + df["velocity_y"] * df["ball_direction_x"]
+            )
+            new_cols.extend(["velocity_alignment", "velocity_perpendicular"])
+
+        # Acceleration
+        if {"acceleration_x", "acceleration_y"}.issubset(df.columns):
+            df["accel_alignment"] = (
+                df["acceleration_x"] * df["ball_direction_x"]
+                + df["acceleration_y"] * df["ball_direction_y"]
+            )
+            df["accel_perpendicular"] = (
+                df["acceleration_x"] * (-df["ball_direction_y"])
+                + df["acceleration_y"] * df["ball_direction_x"]
+            )
+            new_cols.extend(["accel_alignment", "accel_perpendicular"])
+
+        return df, new_cols
+
+    def _create_multi_window_features(self, df: pd.DataFrame):
+        new_cols = []
+        mask = df["player_to_predict"]
+
+        df_target = df.loc[mask].copy()
+
+        for window in (3, 5, 10, 20):
+            for col in ("velocity_x", "velocity_y", "s"):
+                if col in df.columns:
+                    r_mean = (
+                        df_target.groupby(self.gcols)[col]
+                        .rolling(window, min_periods=1)
+                        .mean()
+                        .reset_index(level=list(range(len(self.gcols))), drop=True)
+                    )
+                    r_std = (
+                        df_target.groupby(self.gcols)[col]
+                        .rolling(window, min_periods=1)
+                        .std()
+                        .reset_index(level=list(range(len(self.gcols))), drop=True)
+                    )
+
+                    df.loc[mask, f"{col}_roll{window}"] = r_mean
+                    df.loc[mask, f"{col}_std{window}"] = r_std.fillna(0.0)
+                    df.loc[mask, f"{col}_dev{window}"] = (
+                        df.loc[mask, col].values - r_mean.values
+                    )
+
+                    new_cols.extend(
+                        [
+                            f"{col}_roll{window}",
+                            f"{col}_std{window}",
+                            f"{col}_dev{window}",
+                        ]
+                    )
+
+        # speed_trend_ratio
+        if "s_roll3" in df.columns and "s_roll20" in df.columns:
+            df.loc[mask, "speed_trend_ratio"] = df.loc[mask, "s_roll3"] / (
+                df.loc[mask, "s_roll20"] + 1e-3
+            )
+            new_cols.append("speed_trend_ratio")
+
+        return df, new_cols
+
+    def _create_extended_lag_features(self, df: pd.DataFrame):
+        new_cols = []
+        mask = df["player_to_predict"]
+        df_target = df.loc[mask].copy()
+
+        for lag in (1, 2, 3):
+            for col in ("velocity_x", "velocity_y", "s"):
+                if col in df.columns:
+                    g = df_target.groupby(self.gcols)[col]
+
+                    lagv = g.shift(lag)
+                    fillv = lagv.fillna(g.transform("first"))
+
+                    df.loc[mask, f"{col}_lag{lag}"] = fillv[mask]
+                    new_cols.append(f"{col}_lag{lag}")
+
+                    diffv = df[col] - fillv
+                    df.loc[mask, f"{col}_diff_lag{lag}"] = diffv[mask]
+                    new_cols.append(f"{col}_diff_lag{lag}")
+
+        return df, new_cols
+
+    def _create_motion_change_features(self, df: pd.DataFrame):
+        """
+        Compute features representing changes in a player's velocity, speed, and movement direction between consecutive time steps.
+        """
+        new_cols = []
+        diff_cols = [
+            "velocity_x",
+            "velocity_y",
+            "s",
+            "a",
+            "dir",
+            "o",
+            # "angle_to_ball",
+        ]
+
+        for col in diff_cols:
+            if col not in df.columns:
+                print(f"[WARNING]: {col} not in columns of df!")
+                continue
+
+            new_col = f"{col}_change"
+            df[new_col] = df.groupby(self.gcols)[col].diff().fillna(0.0)
+            if col in ["dir", "o"]:
+                df[new_col] = wrap_angle_deg(df[new_col])
+
+            new_cols.append(new_col)
+
+        return df, new_cols
+
+    def _create_field_position_features(self, df: pd.DataFrame):
+        df["dist_from_left"] = df["y"]
+        df["dist_from_right"] = Config.FIELD_X_MAX - df["y"]
+        df["dist_from_sideline"] = np.minimum(
+            df["dist_from_left"], df["dist_from_right"]
+        )
+        df["dist_from_endzone"] = np.minimum(df["x"], Config.FIELD_Y_MAX - df["x"])
+        df["field_zone_x"] = (df["x"] / Config.FIELD_Y_MAX * 5).astype(int).clip(0, 4)
+        df["field_zone_y"] = (df["y"] / Config.FIELD_X_MAX * 3).astype(int).clip(0, 2)
+        df["in_red_zone"] = (df["dist_from_endzone"] < 20).astype(np.int8)
+        df["near_sideline"] = (df["dist_from_sideline"] < 5).astype(np.int8)
+        df["dist_from_center"] = np.hypot(
+            df["x"] - Config.FIELD_Y_MAX / 2, df["y"] - Config.FIELD_X_MAX / 2
+        )
+        return df, [
+            "dist_from_sideline",
+            "dist_from_endzone",
+            "field_zone_x",
+            "field_zone_y",
+            "in_red_zone",
+            "near_sideline",
+            "dist_from_center",
+        ]
+
+    def _create_distance_rate_features(self, df: pd.DataFrame):
+        """Features related to distance to ball"""
+        new_cols = []
+        if "distance_to_ball" in df.columns:
+            d = df.groupby(self.gcols)["distance_to_ball"].diff()
+            df["d2ball_dt"] = d.fillna(0.0) * Config.FPS
+            df["d2ball_ddt"] = (
+                df.groupby(self.gcols)["d2ball_dt"].diff().fillna(0.0) * Config.FPS
+            )
+            df["time_to_intercept"] = (
+                df["distance_to_ball"] / (df["d2ball_dt"].abs() + 1e-3)
+            ).clip(0, 10)
+            new_cols.extend(["d2ball_dt", "d2ball_ddt", "time_to_intercept"])
+        return df, new_cols
+
+    def _create_geometric_features(self, df: pd.DataFrame):
+        new_cols = []
+        t_total = df["num_frames_output"] / Config.FPS
+
+        # Estimate endpoint based on current status
+        df["geo_endpoint_x"] = df["x"] + df["velocity_x"] * t_total
+        df["geo_endpoint_y"] = df["y"] + df["velocity_y"] * t_total
+        df["geo_endpoint_x"] = df["geo_endpoint_x"].clip(
+            Config.FIELD_X_MIN, Config.FIELD_X_MAX
+        )
+        df["geo_endpoint_y"] = df["geo_endpoint_y"].clip(
+            Config.FIELD_Y_MIN, Config.FIELD_Y_MAX
+        )
+        new_cols.extend(["geo_endpoint_x", "geo_endpoint_y"])
+
+        # TODO: Mirror Receiver
+
+        return df, new_cols
+
+    # NOTE: The neighbor feature is IMPORTANT for model without Spatio info
+    def _create_neighbor_features(self, df: pd.DataFrame):
+        new_cols = []
+        info_cols = [
+            "frame_id",
+            "x",
+            "y",
+            "velocity_x",
+            "velocity_y",
+            "player_side",
+            # "bmi",
+            # "momentum_x",
+            # "momentum_y",
+            # "kinetic_energy",
+            "dir",
+            # "o",
+            "player_to_predict",
+        ]
+
+        # Extract features for last frame
+        info_df = df[self.gcols + info_cols].copy()
+
+        last_df = (
+            info_df[info_df["player_to_predict"]]
+            .sort_values(self.gcols + ["frame_id"])
+            .groupby(self.gcols, as_index=False)
+            .tail(1)
+            .rename(columns={"frame_id": "frame_id_last"})
+            .reset_index(drop=True)
+        )
+
+        nb_cols_map = {c: f"{c}_nb" for c in info_cols + ["nfl_id"]}
+        info_df = last_df.merge(
+            info_df.rename(columns=nb_cols_map),
+            left_on=["game_id", "play_id", "frame_id_last"],
+            right_on=["game_id", "play_id", "frame_id_nb"],
+            how="left",
+        )
+
+        info_df.drop(
+            columns=["player_to_predict", "player_to_predict_nb"], inplace=True
+        )
+        info_df = info_df[info_df["nfl_id_nb"] != info_df["nfl_id"]]
+
+        # Calculate distance and diff of velocity between player and neighbors
+        dx = info_df["x_nb"] - info_df["x"]
+        dy = info_df["y_nb"] - info_df["y"]
+        info_df["dx"] = dx
+        info_df["dy"] = dy
+
+        info_df["dvx"] = info_df["velocity_x_nb"] - info_df["velocity_x"]
+        info_df["dvy"] = info_df["velocity_y_nb"] - info_df["velocity_y"]
+
+        info_df["dist"] = np.sqrt(info_df["dx"] ** 2 + info_df["dy"] ** 2)
+        info_df = info_df[np.isfinite(info_df["dist"]) & (info_df["dist"] > 1e-6)]
+        info_df = info_df[info_df["dist"] <= Config.RADIUS]
+
+        # Calculate weight based on distance
+        info_df["rnk"] = (
+            info_df.groupby(self.gcols)["dist"].rank(method="first").astype(int)
+        )
+        info_df = info_df[info_df["rnk"] <= Config.K_NEIGH]
+
+        info_df["w"] = np.exp(-info_df["dist"] / float(Config.TAU))
+        sum_w = info_df.groupby(self.gcols)["w"].transform("sum")
+        info_df["wn"] = np.where(sum_w > 0, info_df["w"] / sum_w, 0.0)
+
+        info_df["is_ally"] = (
+            info_df["player_side_nb"] == info_df["player_side"]
+        ).astype(np.float32)
+        info_df["is_opp"] = 1.0 - info_df["is_ally"]
+
+        info_df["wn_ally"] = info_df["wn"] * info_df["is_ally"]
+        info_df["wn_opp"] = info_df["wn"] * (1.0 - info_df["is_ally"])
+
+        # Create weight col for agg cols
+        orig_agg_cols = [
+            "momentum_x",
+            "momentum_y",
+            "kinetic_energy",
+            "bmi",
+        ]
+
+        diff_agg_cols = [
+            "dx",
+            "dy",
+            "dvx",
+            "dvy",
+        ]
+
+        for col in orig_agg_cols + diff_agg_cols:
+            if col in orig_agg_cols and col not in info_cols:
+                continue
+            col_nb = f"{col}_nb" if col in orig_agg_cols else col
+            info_df[f"{col}_ally_w"] = info_df[col_nb] * info_df["wn_ally"]
+            info_df[f"{col}_opp_w"] = info_df[col_nb] * info_df["wn_opp"]
+
+        # ally / opp distance
+        info_df["dist_ally"] = np.where(
+            info_df["is_ally"] > 0.5, info_df["dist"], np.nan
+        )
+        info_df["dist_opp"] = np.where(
+            info_df["is_ally"] < 0.5, info_df["dist"], np.nan
+        )
+
+        # Aggregation
+        agg_dict = {}
+        for col in orig_agg_cols + diff_agg_cols:
+            if col in orig_agg_cols and col not in info_cols:
+                continue
+            agg_dict[f"{col}_ally_w"] = "sum"
+            agg_dict[f"{col}_opp_w"] = "sum"
+        agg_dict.update(
+            {
+                "is_ally": "sum",
+                "is_opp": "sum",
+                "dist_ally": ["min", "mean"],
+                "dist_opp": ["min", "mean"],
+            }
+        )
+
+        ag = info_df.groupby(self.gcols).agg(agg_dict)
+        # Flatten MultiIndex columns
+        ag.columns = ["_".join(filter(None, col)).strip() for col in ag.columns.values]
+        ag = ag.reset_index()
+
+        # Nearest neighbors
+        ADD_NEAREST_FEAT = True
+        if ADD_NEAREST_FEAT:
+            K = 3
+            near_cols = ["dist"]
+            # near_cols = ["dist", "x", "y", "dir"]
+            near = info_df.loc[
+                info_df["rnk"] <= K, self.gcols + ["rnk"] + near_cols
+            ].copy()
+            # near_cols = ["dist", "x", "y", "dir"]
+            # near = info_df_all.loc[
+            #     info_df_all["rnk"] <= K, self.gcols + ["rnk"] + near_cols
+            # ].copy()
+            # near["rnk"] = near["rnk"].astype(int)
+
+            for col in near_cols:
+                dwide = near.pivot_table(
+                    index=self.gcols, columns="rnk", values=col, aggfunc="first"
+                )
+                dwide = dwide.rename(
+                    columns={i: f"gnn_n{int(i)}_{col}" for i in dwide.columns}
+                ).reset_index()
+                ag = ag.merge(dwide, on=self.gcols, how="left")
+
+        # Merge back to df
+        new_cols = [c for c in ag.columns if c not in self.gcols]
+        for c in new_cols:
+            ag[c] = ag[c].fillna(0.0)
+
+        df = df.merge(ag, on=self.gcols, how="left")
+
+        # Defense(Offense) Pressure
+        ADD_PRESSURE_FEAT = True
+        if ADD_PRESSURE_FEAT:
+            df["dist_opp_min"] = df["dist_opp_min"].replace(0, np.nan)
+            df["dist_ally_min"] = df["dist_ally_min"].replace(0, np.nan)
+            df["dist_opp_eff"] = df["dist_opp_min"].fillna(np.inf)
+            df["dist_ally_eff"] = df["dist_ally_min"].fillna(np.inf)
+
+            df["pressure"] = 1 / np.maximum(df["dist_opp_eff"], 0.5)
+            df["under_pressure"] = (df["dist_opp_eff"] < 3).astype(int)
+            df["have_assistance"] = (
+                (df["dist_ally_min"].notna())
+                & (df["dist_ally_eff"] < df["dist_opp_eff"])
+            ).astype(int)
+
+            df.drop(columns=["dist_opp_eff", "dist_ally_eff"], inplace=True)
+
+            df["pressure_speed"] = df["pressure"] * df["s"]
+            df["ally_density"] = df["is_ally_sum"] / (
+                np.pi * df["dist_ally_mean"] ** 2 + 1e-6
+            )
+            df["oppn_density"] = df["is_opp_sum"] / (
+                np.pi * df["dist_opp_mean"] ** 2 + 1e-6
+            )
+            df["density_ratio"] = df["ally_density"] / (df["oppn_density"] + 1e-6)
+
+            new_cols.extend(
+                [
+                    "pressure",
+                    "under_pressure",
+                    "have_assistance",
+                    "pressure_speed",
+                    "ally_density",
+                    "oppn_density",
+                    "density_ratio",
+                ]
+            )
+
+        return df, new_cols
+
+    def _create_time_features(self, df: pd.DataFrame):
+        new_cols = []
+
+        max_frame = df.groupby(self.gcols)["frame_id"].transform("max")
+        df["time_to_end"] = max_frame - df["frame_id"] + df["num_frames_output"]
+        df["time_urgency"] = 1 / df["time_to_end"]
+        df["time_dist_urgency"] = df["distance_to_ball"] / df["time_to_end"]
+        new_cols.extend(["time_to_end", "time_urgency", "time_dist_urgency"])
+
+        df["time_normalized_pass"] = df["frame_id"] / max_frame
+        df["time_normalized_all"] = df["frame_id"] / (
+            max_frame + df["num_frames_output"]
+        )
+        new_cols.extend(["time_normalized_pass", "time_normalized_all"])
+
+        return df, new_cols
+
+    def _create_opponent_features(self, df: pd.DataFrame):
+        new_cols = []
+        return df, new_cols
+
+    def _create_role_features(self, df: pd.DataFrame):
+        new_cols = []
+        if {"is_receiver", "velocity_alignment"}.issubset(df.columns):
+            df["receiver_optimality"] = df["is_receiver"] * df["velocity_alignment"]
+            df["receiver_deviation"] = df["is_receiver"] * np.abs(
+                df.get("velocity_perpendicular", 0.0)
+            )
+            df["receiver_speed_usage"] = (
+                df["is_receiver"] * df["s"] / (df["s"].max() + 1e-3)
+            )
+            new_cols.extend(
+                ["receiver_optimality", "receiver_deviation", "receiver_speed_usage"]
+            )
+        if {"is_coverage", "closing_speed"}.issubset(df.columns):
+            df["defender_closing_speed"] = df["is_coverage"] * df["closing_speed"]
+            df["defender_pressure"] = df["is_coverage"] / (
+                df.get("distance_to_ball", 10.0) + 1e-3
+            )
+            new_cols.extend(["defender_closing_speed", "defender_pressure"])
+
+        return df, new_cols
+
+    def _create_passer_features(self, df: pd.DataFrame):
+        # Get (x, y) position of passer
+        passer_df = (
+            df[df["player_role"] == "Passer"]
+            .groupby(["game_id", "play_id", "frame_id"], as_index=False)[["x", "y"]]
+            .first()
+            .rename(columns={"x": "passer_x", "y": "passer_y"})
+        )
+
+        # Merge
+        df = df.merge(
+            passer_df,
+            on=["game_id", "play_id", "frame_id"],
+            how="left",
+            validate="many_to_one",
+        )
+
+        mask = df["player_to_predict"]
+
+        dx = df.loc[mask, "x"].astype("float32") - df.loc[mask, "passer_x"].astype(
+            "float32"
+        )
+        dy = df.loc[mask, "y"].astype("float32") - df.loc[mask, "passer_y"].astype(
+            "float32"
+        )
+
+        dist = np.sqrt(dx * dx + dy * dy) + 1e-6
+        ux, uy = dx / dist, dy / dist
+
+        vx = df.loc[mask, "velocity_x"].astype("float32")
+        vy = df.loc[mask, "velocity_y"].astype("float32")
+
+        align = vx * ux + vy * uy
+        perp = vx * (-uy) + vy * ux
+
+        dir_rad = np.deg2rad(df.loc[mask, "dir"].fillna(0).astype("float32"))
+
+        # bearing
+        to_passer_angle = np.arctan2(-dy, -dx)
+        bearing = np.rad2deg(to_passer_angle - dir_rad)
+        bearing = wrap_angle_deg(bearing)
+
+        pass_dx = df.loc[mask, "ball_land_x"].astype("float32") - df.loc[
+            mask, "passer_x"
+        ].astype("float32")
+        pass_dy = df.loc[mask, "ball_land_y"].astype("float32") - df.loc[
+            mask, "passer_y"
+        ].astype("float32")
+        pass_direction = np.rad2deg(np.arctan2(pass_dy, pass_dx))
+
+        # Drop unused columns
+        df.drop(columns=["passer_x", "passer_y"], inplace=True)
+
+        # write back to df
+        df.loc[mask, "passer_distance"] = dist
+        df.loc[mask, "v_to_passer_alignment"] = align
+        df.loc[mask, "v_to_passer_perp"] = perp
+        df.loc[mask, "bearing_to_passer"] = bearing
+        df.loc[mask, "pass_direction"] = pass_direction
+
+        new_cols = [
+            "passer_distance",
+            "v_to_passer_alignment",
+            "v_to_passer_perp",
+            "bearing_to_passer",
+            # "pass_direction",
+        ]
+
+        return df, new_cols
+
+    def _create_curvature_features(self, df: pd.DataFrame):
+        new_cols = []
+
+        dx = df["ball_land_x"] - df["x"]
+        dy = df["ball_land_y"] - df["y"]
+
+        a_dir = np.deg2rad(df["dir"].fillna(0.0).values)
+
+        # bearing signed
+        bearing = np.arctan2(dy, dx)
+        df["bearing_to_land_signed"] = np.rad2deg(
+            np.arctan2(np.sin(bearing - a_dir), np.cos(bearing - a_dir))
+        )
+
+        # lateral offset (2D cross)
+        ux, uy = np.cos(a_dir), np.sin(a_dir)
+        df["land_lateral_offset"] = dy * ux - dx * uy
+
+        # curvature
+        dir_rad = np.deg2rad(df["dir"].fillna(0.0).values)
+        curvature_signed = np.zeros(len(df), dtype="float32")
+
+        df["_grp"] = pd.factorize(df[self.gcols].apply(tuple, axis=1))[0]
+        grp_ids, grp_counts = np.unique(df["_grp"], return_counts=True)
+        start_idx = 0
+        for gid, cnt in tqdm(zip(grp_ids, grp_counts), total=len(grp_ids)):
+            idx = slice(start_idx, start_idx + cnt)
+            ddir = np.diff(dir_rad[idx], prepend=dir_rad[idx][0])
+            # wrap [-pi, pi]
+            ddir = (ddir + np.pi) % (2 * np.pi) - np.pi
+            # curvature = delta_dir / (s * dt)
+            s = df["s"].values[idx].astype("float32")
+            curvature_signed[idx] = ddir / (s / Config.FPS + 1e-6)
+            start_idx += cnt
+
+        df["curvature_signed"] = curvature_signed
+        df["curvature_abs"] = np.abs(curvature_signed)
+
+        # Clear temporary columns
+        df.drop(columns="_grp", inplace=True)
+
+        new_cols = [
+            "curvature_abs",
+        ]
+
+        return df, new_cols
+
+    def _create_route_features(self, df: pd.DataFrame):
+        # mask only players to predict
+        mask = df["player_to_predict"] == 1
+        sub = df[mask].copy()
+
+        # Only use last 5 frames per player
+        sub = sub.sort_values(self.gcols + ["frame_id"]).groupby(self.gcols).tail(5)
+
+        # Compute diffs
+        sub["dx"] = sub.groupby(self.gcols)["x"].diff()
+        sub["dy"] = sub.groupby(self.gcols)["y"].diff()
+        sub["ds"] = sub.groupby(self.gcols)["s"].diff()
+
+        # Distance each step
+        sub["step_dist"] = np.sqrt(sub["dx"] ** 2 + sub["dy"] ** 2)
+
+        # angles -> second order angle change
+        sub["angle"] = np.arctan2(sub["dy"], sub["dx"])
+        sub["dangle"] = sub.groupby(self.gcols)["angle"].diff().abs()
+
+        # Total distance & displacement
+        feats = (
+            sub.groupby(self.gcols)
+            .agg(
+                traj_total_dist=("step_dist", "sum"),
+                start_x=("x", "first"),
+                end_x=("x", "last"),
+                start_y=("y", "first"),
+                end_y=("y", "last"),
+                speed_mean=("s", "mean"),
+                speed_change=("s", lambda s: s.iloc[-1] - s.iloc[0]),
+                traj_turn_ratio=("dangle", lambda a: (a > np.pi / 6).mean()),
+            )
+            .reset_index()
+        )
+
+        # displacement
+        feats["traj_dx"] = feats["end_x"] - feats["start_x"]
+        feats["traj_dy"] = feats["end_y"] - feats["start_y"]
+        feats["traj_displacement"] = np.sqrt(
+            feats["traj_dx"] ** 2 + feats["traj_dy"] ** 2
+        )
+
+        # straightness
+        feats["traj_straightness"] = feats["traj_displacement"] / (
+            feats["traj_total_dist"] + 0.1
+        )
+
+        # route depth / width / angle
+        feats["traj_depth"] = feats["traj_dx"].abs()
+        feats["traj_width"] = feats["traj_dy"].abs()
+        feats["traj_direction_angle"] = np.arctan2(feats["traj_dy"], feats["traj_dx"])
+
+        # Energy and momentum
+        feats["traj_energy"] = feats["speed_mean"] ** 2 * feats["traj_total_dist"]
+        feats["traj_momentum"] = feats["speed_mean"] * feats["traj_displacement"]
+
+        turn = (
+            sub.groupby(self.gcols)
+            .agg(
+                traj_max_turn=("dangle", "max"),
+                traj_mean_turn=("dangle", "mean"),
+            )
+            .reset_index()
+        )
+
+        # Merge angle features
+        feats = feats.merge(turn, on=self.gcols, how="left")
+
+        feat_cols = [
+            "speed_mean",
+            "speed_change",
+            # "traj_turn_ratio",
+            "traj_straightness",
+            "traj_depth",
+            "traj_width",
+            "traj_direction_angle",
+            # "traj_energy",
+            # "traj_momentum",
+            "traj_max_turn",
+            "traj_mean_turn",
+        ]
+
+        # merge back to df (only fill masked rows)
+        df = df.merge(
+            feats[self.gcols + feat_cols],
+            on=self.gcols,
+            how="left",
+        )
+
+        return df, feat_cols
+
+    def _create_cooperation_features(self, df: pd.DataFrame, K: int = 3):
+        new_cols = []
+
+        info_cols = [
+            "frame_id",
+            "x",
+            "y",
+            "velocity_x",
+            "velocity_y",
+            "s",
+            "a",
+            "player_side",
+        ]
+
+        info_df = df[self.gcols + info_cols].copy()
+        last_df = (
+            info_df.sort_values(self.gcols + ["frame_id"])
+            .groupby(self.gcols, as_index=False)
+            .tail(1)
+            .rename(columns={"frame_id": "frame_id_last"})
+            .reset_index(drop=True)
+        )
+
+        nb_cols_map = {c: f"{c}_nb" for c in info_cols}
+
+        info_df = last_df.merge(
+            info_df.rename(columns=nb_cols_map),
+            left_on=["game_id", "play_id", "frame_id_last"],
+            right_on=["game_id", "play_id", "frame_id_nb"],
+            how="left",
+        )
+
+        info_df = info_df[
+            (info_df["nfl_id_nb"] != info_df["nfl_id"])
+            & (info_df["player_side_nb"] == info_df["player_side"])
+        ]
+
+        dx = info_df["x_nb"] - info_df["x"]
+        dy = info_df["y_nb"] - info_df["y"]
+        info_df["dist"] = np.sqrt(dx**2 + dy**2)
+
+        info_df = info_df[np.isfinite(info_df["dist"]) & (info_df["dist"] > 1e-3)]
+        info_df = info_df[info_df["dist"] <= getattr(Config, "RADIUS", 15.0)]
+
+        info_df["rnk"] = info_df.groupby(self.gcols)["dist"].rank(method="first")
+        info_df = info_df[info_df["rnk"] <= K]
+
+        info_df["vx_diff"] = info_df["velocity_x_nb"] - info_df["velocity_x"]
+        info_df["vy_diff"] = info_df["velocity_y_nb"] - info_df["velocity_y"]
+        info_df["speed_diff"] = info_df["s_nb"] - info_df["s"]
+        info_df["acc_diff"] = info_df["a_nb"] - info_df["a"]
+
+        info_df["angle_self"] = np.arctan2(info_df["velocity_y"], info_df["velocity_x"])
+        info_df["angle_nb"] = np.arctan2(
+            info_df["velocity_y_nb"], info_df["velocity_x_nb"]
+        )
+        info_df["angle_diff"] = np.abs(info_df["angle_self"] - info_df["angle_nb"])
+        info_df["angle_diff"] = np.where(
+            info_df["angle_diff"] > np.pi,
+            2 * np.pi - info_df["angle_diff"],
+            info_df["angle_diff"],
+        )
+        info_df["heading_align"] = np.cos(info_df["angle_diff"])
+
+        info_df["approaching_rate"] = (
+            dx * info_df["vx_diff"] + dy * info_df["vy_diff"]
+        ) / (info_df["dist"] + 1e-3)
+
+        ag = (
+            info_df.groupby(self.gcols)
+            .agg(
+                coop_nearest_dist=("dist", "min"),
+                coop_speed_diff=("speed_diff", "mean"),
+                coop_acc_diff=("acc_diff", "mean"),
+                coop_heading_align=("heading_align", "mean"),
+                coop_approaching=("approaching_rate", "mean"),
+            )
+            .reset_index()
+        )
+
+        new_cols = [
+            "coop_nearest_dist",
+            "coop_speed_diff",
+            "coop_acc_diff",
+            "coop_heading_align",
+            "coop_approaching",
+        ]
+        for c in new_cols:
+            ag[c] = ag[c].fillna(0.0)
+
+        df = df.merge(ag[self.gcols + new_cols], on=self.gcols, how="left")
+        return df, new_cols
+
+    def _create_receiver_features(self, df: pd.DataFrame):
+        """Almost the same as `self._create_passer_features`"""
+        # Get (x, y) position of receiver
+        receiver_df = (
+            df[df["player_role"] == "Targeted Receiver"]
+            .groupby(["game_id", "play_id", "frame_id"], as_index=False)[["x", "y"]]
+            .first()
+            .rename(columns={"x": "receiver_x", "y": "receiver_y"})
+        )
+
+        df = df.merge(
+            receiver_df,
+            on=["game_id", "play_id", "frame_id"],
+            how="left",
+            validate="many_to_one",
+        )
+        mask = df["player_to_predict"]
+
+        dx = df.loc[mask, "x"].astype("float32") - df.loc[mask, "receiver_x"].astype(
+            "float32"
+        )
+        dy = df.loc[mask, "y"].astype("float32") - df.loc[mask, "receiver_y"].astype(
+            "float32"
+        )
+
+        dist = np.sqrt(dx * dx + dy * dy) + 1e-6
+        ux, uy = dx / dist, dy / dist
+
+        vx = df.loc[mask, "velocity_x"].astype("float32")
+        vy = df.loc[mask, "velocity_y"].astype("float32")
+
+        # Projection
+        align = vx * ux + vy * uy
+        perp = vx * (-uy) + vy * ux
+
+        dir_rad = np.deg2rad(df.loc[mask, "dir"].fillna(0).astype("float32"))
+
+        # bearing
+        to_receiver_angle = np.arctan2(-dy, -dx)
+        bearing = np.rad2deg(to_receiver_angle - dir_rad)
+        bearing = wrap_angle_deg(bearing)
+
+        # write back to df
+        df.loc[mask, "receiver_distance"] = dist
+        df.loc[mask, "v_to_receiver_alignment"] = align
+        df.loc[mask, "v_to_receiver_perp"] = perp
+        df.loc[mask, "bearing_to_receiver"] = bearing
+
+        new_cols = [
+            "receiver_distance",
+            "v_to_receiver_alignment",
+            "v_to_receiver_perp",
+            "bearing_to_receiver",
+        ]
+
+        return df, new_cols
+
+    def transform(self, df: pd.DataFrame):
+        df = df.copy().sort_values(["game_id", "play_id", "nfl_id", "frame_id"])
+        # # Use index to accelerate groupby and merge operations
+        # df.set_index(self.gcols, inplace=True, drop=False)
         df = self._create_basic_features(df)
 
-        print("\nStep 2/4: Adding selected advanced features...")
+        # TODO: Optimize for interactive=False
         for group_name in self.active_groups:
             if group_name in self.feature_creators:
-                creator = self.feature_creators[group_name]
+                creator, interactive = self.feature_creators[group_name]
+                start_time = time.time()
                 df, new_cols = creator(df)
+                elapsed = time.time() - start_time
                 self.created_feature_cols.extend(new_cols)
-                print(f"  [+] Added '{group_name}' ({len(new_cols)} cols)")
+                print(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] [+] Added '{group_name}' "
+                    f"({len(new_cols)} cols) in {elapsed:.2f}s\n    Columns: {new_cols}"
+                )
             else:
-                print(f"  [!] Unknown feature group: {group_name}")
+                print(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] [!] Unknown feature group: {group_name}"
+                )
 
+        df = df[df["player_to_predict"]]
         final_cols = sorted(set(self.created_feature_cols))
         print(f"\nTotal features created: {len(final_cols)}")
         return df, final_cols
 
-# -------------------------------
-# Sequence preparation (optimized from nn-gru2.py)
-# -------------------------------
-def build_play_direction_map(df_in: pd.DataFrame) -> pd.Series:
-    s = (
-        df_in[['game_id','play_id','play_direction']]
-        .drop_duplicates()
-        .set_index(['game_id','play_id'])['play_direction']
-    )
-    return s
 
-def apply_direction_to_df(df: pd.DataFrame, dir_map: pd.Series) -> pd.DataFrame:
-    if 'play_direction' not in df.columns:
-        dir_df = dir_map.reset_index()
-        df = df.merge(dir_df, on=['game_id','play_id'], how='left', validate='many_to_one')
-    return unify_left_direction(df)
-
-def prepare_sequences_with_advanced_features(
-        input_df, output_df=None, test_template=None, 
-        is_training=True, window_size=10, feature_groups=None):
-
-    print(f"\n{'='*80}")
-    print(f"FUSED SEQUENCE PREPARATION WITH ADVANCED FEATURES")
-    print(f"{'='*80}")
-    print(f"Window size: {window_size}")
-
-    if feature_groups is None:
-        feature_groups = [
-            'distance_rate','target_alignment','multi_window_rolling','extended_lags',
-            'velocity_changes','field_position','role_specific','time_features','jerk_features',
-            'curvature_land_features','player_interaction_distance',
-        ]
-
-    # Direction map and unify (from nn-gru2.py)
-    dir_map = build_play_direction_map(input_df)
-    input_df_u = unify_left_direction(input_df)
-    
-    if is_training:
-        out_u = apply_direction_to_df(output_df, dir_map)
-        target_rows = out_u
-        target_groups = out_u[['game_id','play_id','nfl_id']].drop_duplicates()
-    else:
-        if 'play_direction' not in test_template.columns:
-            dir_df = dir_map.reset_index()
-            test_template = test_template.merge(dir_df, on=['game_id','play_id'], how='left', validate='many_to_one')
-        target_rows = test_template
-        target_groups = target_rows[['game_id','play_id','nfl_id','play_direction']].drop_duplicates()
-
-    # Feature engineering
-    fe = FeatureEngineer(feature_groups)
-    processed_df, feature_cols = fe.transform(input_df_u)
-
-    # Add GNN-lite features (from nn-mps.py)
-    print("\nStep 3/4: Adding GNN Lite features...")
-    gnn_processor = GNNLiteProcessor()
-    gnn_features = gnn_processor.compute_neighbor_embeddings(processed_df)
-    
-    processed_df = processed_df.merge(
-        gnn_features,
-        on=['game_id', 'play_id', 'nfl_id'],
-        how='left'
-    )
-    
-    # Add GNN features to feature list
-    gnn_cols = [c for c in processed_df.columns if c.startswith('gnn_')]
-    for col in gnn_cols:
-        if col in ['gnn_ally_cnt', 'gnn_opp_cnt']:
-            processed_df[col] = processed_df[col].fillna(0.0)
-        elif 'mean' in col or 'dx' in col or 'dy' in col or 'dvx' in col or 'dvy' in col:
-            processed_df[col] = processed_df[col].fillna(0.0)
-        else:
-            processed_df[col] = processed_df[col].fillna(Config.RADIUS)
-    
-    feature_cols.extend(gnn_cols)
-
-    # Optimized sequence building (from nn-gru2.py)
-    print("\nStep 4/4: Creating sequences...")
-    
-    processed_df = processed_df.sort_values(['game_id','play_id','nfl_id','frame_id'])
-    
-    grouped_dict = {
-        key: group[feature_cols].values 
-        for key, group in processed_df.groupby(['game_id','play_id','nfl_id'])
-    }
-    
-    group_means = processed_df.groupby(['game_id','play_id','nfl_id'])[feature_cols].mean()
-    
-    idx_x = feature_cols.index('x')
-    idx_y = feature_cols.index('y')
-    
-    n_targets = len(target_groups)
-    sequences = []
-    targets_dx = [] if is_training else None
-    targets_dy = [] if is_training else None
-    targets_fids = [] if is_training else None
-    seq_meta = []
-    
-    target_array = target_groups.values
-    
-    if is_training:
-        target_rows = target_rows.sort_values(['game_id','play_id','nfl_id','frame_id'])
-        target_lookup = {
-            (gid, pid, nid): group[['x','y','frame_id']].values
-            for (gid, pid, nid), group in target_rows.groupby(['game_id','play_id','nfl_id'])
-        }
-    
-    for i in tqdm(range(n_targets), desc="Creating sequences"):
-        if is_training:
-            gid, pid, nid = target_array[i, :3]
-            play_dir = None
-        else:
-            gid, pid, nid, play_dir = target_array[i, :4]
-        
-        key = (gid, pid, nid)
-        
-        if key not in grouped_dict:
-            continue
-        
-        group_data = grouped_dict[key]
-        
-        if len(group_data) >= window_size:
-            input_window = group_data[-window_size:]
-        else:
-            if is_training:
-                continue
-            pad_len = window_size - len(group_data)
-            pad_array = np.full((pad_len, len(feature_cols)), np.nan, dtype=np.float32)
-            input_window = np.vstack([pad_array, group_data])
-        
-        if key in group_means.index:
-            mean_vals = group_means.loc[key].values
-            nan_mask = np.isnan(input_window)
-            input_window = np.where(nan_mask, mean_vals, input_window)
-        
-        if np.isnan(input_window).any():
-            if is_training:
-                continue
-            input_window = np.nan_to_num(input_window, nan=0.0)
-        
-        sequences.append(input_window.astype(np.float32))
-        
-        if is_training:
-            if key not in target_lookup:
-                continue
-            
-            target_data = target_lookup[key]
-            
-            last_x = input_window[-1, idx_x]
-            last_y = input_window[-1, idx_y]
-            
-            dx = (target_data[:, 0] - last_x).astype(np.float32)
-            dy = (target_data[:, 1] - last_y).astype(np.float32)
-            fids = target_data[:, 2].astype(np.int32)
-            
-            targets_dx.append(dx)
-            targets_dy.append(dy)
-            targets_fids.append(fids)
-        
-        seq_meta.append({
-            'game_id': int(gid),
-            'play_id': int(pid),
-            'nfl_id': int(nid),
-            'frame_id': int(processed_df[
-                (processed_df['game_id']==gid) & 
-                (processed_df['play_id']==pid) & 
-                (processed_df['nfl_id']==nid)
-            ]['frame_id'].iloc[-1]),
-            'play_direction': play_dir,
-        })
-    
-    print(f"Created {len(sequences)} sequences with {len(feature_cols)} features each")
-
-    if is_training:
-        return sequences, targets_dx, targets_dy, targets_fids, seq_meta, feature_cols, dir_map
-    return sequences, seq_meta, feature_cols, dir_map
-
-# -------------------------------
-# Fused Model Architecture
-# -------------------------------
+# === Model & Loss ===
 class TemporalHuber(nn.Module):
-    """Enhanced loss from nn-gru2.py with optimizations."""
-    def __init__(self, delta=0.5, time_decay=0.03, velocity_penalty_weight=0.01,
-                 acceleration_penalty_weight=0.0, use_huber_for_penalty=False):
+    def __init__(self, delta=0.5, time_decay=0.02, lam_smooth=0.01):
         super().__init__()
         self.delta = delta
         self.time_decay = time_decay
-        self.velocity_penalty_weight = velocity_penalty_weight
-        self.acceleration_penalty_weight = acceleration_penalty_weight
-        self.use_huber_for_penalty = use_huber_for_penalty
-        
-        self.has_velocity_penalty = velocity_penalty_weight > 0
-        self.has_acceleration_penalty = acceleration_penalty_weight > 0
-        self.has_time_decay = time_decay > 0
-        
-        self._cached_time_weights = {}
-    
-    def _get_time_weights(self, length, device):
-        key = (length, device)
-        if key not in self._cached_time_weights:
-            t = torch.arange(length, device=device, dtype=torch.float32)
-            self._cached_time_weights[key] = torch.exp(-self.time_decay * t).view(1, -1)
-        return self._cached_time_weights[key]
-    
-    def _huber_loss(self, err):
-        abs_err = torch.abs(err)
-        return torch.where(abs_err <= self.delta,
-                          0.5 * err.square(),
-                          self.delta * (abs_err - 0.5 * self.delta))
-    
-    def forward(self, pred, target, mask):
-        err = pred - target
-        huber = self._huber_loss(err)
-        
-        if self.has_time_decay:
-            time_weights = self._get_time_weights(pred.size(1), pred.device)
-            mask_weighted = mask * time_weights
-            huber = huber * time_weights
-        else:
-            mask_weighted = mask
-            time_weights = None
-        
-        main_loss = (huber * mask_weighted).sum() / (mask_weighted.sum() + 1e-8)
-        
-        if not (self.has_velocity_penalty or self.has_acceleration_penalty):
-            return main_loss
-        
-        total_loss = main_loss
-        
-        if self.has_velocity_penalty and pred.size(1) > 1:
-            velocity_diff = pred[:, 1:] - pred[:, :-1]
-            mask_vel = mask[:, 1:]
-            
-            if self.use_huber_for_penalty:
-                vel_loss = self._huber_loss(velocity_diff)
-            else:
-                vel_loss = velocity_diff.square()
-            
-            if self.has_time_decay:
-                time_weights_vel = time_weights[:, 1:]
-                vel_loss = vel_loss * time_weights_vel
-                mask_vel = mask_vel * time_weights_vel
-            
-            velocity_penalty = (vel_loss * mask_vel).sum() / (mask_vel.sum() + 1e-8)
-            total_loss = total_loss + self.velocity_penalty_weight * velocity_penalty
-        
-        if self.has_acceleration_penalty and pred.size(1) > 2:
-            if not self.has_velocity_penalty:
-                velocity_diff = pred[:, 1:] - pred[:, :-1]
-            
-            acceleration = velocity_diff[:, 1:] - velocity_diff[:, :-1]
-            mask_acc = mask[:, 2:]
-            
-            if self.use_huber_for_penalty:
-                acc_loss = self._huber_loss(acceleration)
-            else:
-                acc_loss = acceleration.square()
-            
-            if self.has_time_decay:
-                time_weights_acc = time_weights[:, 2:]
-                acc_loss = acc_loss * time_weights_acc
-                mask_acc = mask_acc * time_weights_acc
-            
-            acceleration_penalty = (acc_loss * mask_acc).sum() / (mask_acc.sum() + 1e-8)
-            total_loss = total_loss + self.acceleration_penalty_weight * acceleration_penalty
-        
-        return total_loss
+        self.lam_smooth = lam_smooth
 
-class FusedTransformerModel(nn.Module):
-    """
-    Fused architecture combining:
-    - CNN preprocessing (from nn-mps.py)
-    - Transformer encoder (from nn-gru2.py)
-    - Dual attention pooling (from nn-mps.py)
-    - Advanced prediction head
-    """
-    def __init__(self, input_dim, horizon):
-        super().__init__()
-        self.hidden_dim = Config.D_MODEL
-        self.horizon = horizon
-        
-        # CNN preprocessing (from nn-mps.py)
-        self.cnn = nn.Conv1d(
-            in_channels=input_dim, 
-            out_channels=64, 
-            kernel_size=3, 
-            padding=1
+    def forward(self, pred, target, mask):
+        # base huber
+        err = pred - target
+        abs_err = torch.abs(err)
+        huber = torch.where(
+            abs_err <= self.delta,
+            0.5 * err * err,
+            self.delta * (abs_err - 0.5 * self.delta),
         )
-        
-        # Input projection for transformer
-        self.input_proj = nn.Linear(input_dim, self.hidden_dim)
-        
-        # Positional encoding
-        pos_encoding = torch.randn(1, Config.WINDOW_SIZE, self.hidden_dim) * 0.02
-        self.register_buffer('pos_encoding', pos_encoding)
-        
-        # Transformer Encoder (from nn-gru2.py)
+
+        # time decay
+        if self.time_decay and self.time_decay > 0:
+            L = pred.size(1)
+            t = torch.arange(L, device=pred.device, dtype=pred.dtype)
+            w = torch.exp(-self.time_decay * t).view(1, L, 1)
+            huber = huber * w
+            mask = mask.unsqueeze(-1) * w
+
+        main_loss = (huber * mask).sum() / (mask.sum() + 1e-8)
+
+        # # velocity smooth
+        # if self.lam_smooth and pred.size(1) > 2:
+        #     d1 = pred[:, 1:] - pred[:, :-1]
+        #     d2 = d1[:, 1:] - d1[:, :-1]
+        #     m2 = mask[:, 2:]
+        #     smooth = (d2 * d2) * m2
+        #     smooth_loss = smooth.sum() / (m2.sum() + 1e-8)
+        # else:
+        #     smooth_loss = pred.new_tensor(0.0)
+
+        return main_loss
+
+
+# Removed legacy RotaryEmbedding/rope utilities (not used)
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, input_dim, hidden_dim, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.Dropout(dropout),
+        )
+        self.activation = nn.GELU()
+
+    def forward(self, x):
+        return self.activation(self.net(x) + x)
+
+
+class ResidualMLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=2, dropout=0.2):
+        super().__init__()
+        layers = []
+
+        layers.append(nn.Linear(input_dim, hidden_dim))
+        layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.GELU())
+        layers.append(nn.Dropout(dropout))
+
+        for _ in range(num_layers - 2):
+            layers.append(ResidualBlock(hidden_dim, hidden_dim, dropout))
+
+        layers.append(nn.Linear(hidden_dim, output_dim))
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class STTransformer(nn.Module):
+    """
+    Spatio-Temporal Transformer
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.horizon = Config.MAX_FUTURE_HORIZON
+        self.hidden_dim = Config.HIDDEN_DIM
+        self.n_heads = Config.N_HEADS
+        self.n_layers = Config.N_LAYERS
+        self.n_querys = Config.N_QUERYS
+
+        # 1. Spatio
+        self.input_projection = nn.Linear(input_dim, self.hidden_dim)
+
+        # 2. Positional encoding for time and player axes
+        self.pos_time = nn.Parameter(
+            torch.randn(1, Config.WINDOW_SIZE, self.hidden_dim)
+        )
+        self.pos_player = nn.Parameter(
+            torch.randn(
+                1,
+                Config.MAX_PLAYER + (1 if getattr(Config, "ADD_BALL_TOKEN", False) else 0),
+                self.hidden_dim,
+            )
+        )
+        self.embed_dropout = nn.Dropout(dropout)
+
+        # 3a. Transformer Encoder (legacy / flattened)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.hidden_dim,
-            nhead=Config.N_HEADS,
+            nhead=self.n_heads,
             dim_feedforward=self.hidden_dim * 4,
-            dropout=Config.DROPOUT,
-            activation='gelu',
+            dropout=dropout,
             batch_first=True,
-            norm_first=True
+            norm_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=Config.N_LAYERS)
-        
-        # Dual attention pooling (from nn-mps.py)
-        self.attention_pooling = nn.Sequential(
-            nn.Linear(self.hidden_dim, 64),
-            nn.Tanh(),
-            nn.Linear(64, 1),
-            nn.Softmax(dim=1)
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=self.n_layers
         )
-        
+
+        # 3b. Axial encoders
+        time_layer = nn.TransformerEncoderLayer(
+            d_model=self.hidden_dim,
+            nhead=self.n_heads,
+            dim_feedforward=self.hidden_dim * 4,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+        )
+        player_layer = nn.TransformerEncoderLayer(
+            d_model=self.hidden_dim,
+            nhead=self.n_heads,
+            dim_feedforward=self.hidden_dim * 4,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.time_encoder = nn.TransformerEncoder(time_layer, num_layers=self.n_layers)
+        self.player_encoder = nn.TransformerEncoder(player_layer, num_layers=self.n_layers)
+
+        # 4. Anchored pooling: select targeted player's last time token
         self.pool_ln = nn.LayerNorm(self.hidden_dim)
-        self.pool_attn = nn.MultiheadAttention(
-            self.hidden_dim, num_heads=Config.N_HEADS, 
-            batch_first=True
-        )
-        self.pool_query = nn.Parameter(torch.randn(1, 1, self.hidden_dim))
-        
-        # Learnable pooling combination (from nn-mps.py)
-        self.pooling_weight = nn.Parameter(torch.tensor(0.5))
-        
-        # Enhanced prediction head
-        self.head = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim), 
-            nn.GELU(), 
-            nn.Dropout(0.2), 
-            nn.Linear(self.hidden_dim, 64),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(64, horizon)
-        )
-        
-        self._pool_query_cache = {}
-    
-    def _get_pool_query(self, batch_size):
-        if batch_size not in self._pool_query_cache:
-            self._pool_query_cache[batch_size] = self.pool_query.expand(batch_size, -1, -1)
-        return self._pool_query_cache[batch_size]
-    
-    def forward(self, x):
-        B, seq_len, _ = x.shape
-        
-        # CNN preprocessing path
-        x_cnn = x.transpose(1, 2)  # (B, features, seq_len)
-        cnn_out = self.cnn(x_cnn)  # (B, 64, seq_len)
-        cnn_out = cnn_out.transpose(1, 2)  # (B, seq_len, 64)
-        
-        # Transformer path
-        x_proj = self.input_proj(x)
-        x_proj = x_proj + self.pos_encoding[:, :seq_len, :]
-        
-        h = self.transformer(x_proj)  # (B, seq_len, hidden_dim)
-        
-        # Dual attention pooling (from nn-mps.py)
-        # Method 1: Attention pooling
-        att_w = self.attention_pooling(h)
-        ctx1 = torch.sum(att_w * h, dim=1)
-        
-        # Method 2: Multi-head attention pooling
-        q = self._get_pool_query(B)
-        ctx2, _ = self.pool_attn(q, self.pool_ln(h), self.pool_ln(h))
-        ctx2 = ctx2.squeeze(1)
-        
-        # Learnable combination
-        alpha = torch.sigmoid(self.pooling_weight)
-        ctx = alpha * ctx1 + (1.0 - alpha) * ctx2
-        
-        # Prediction
-        out = self.head(ctx)
-        return torch.cumsum(out, dim=1)
 
-# -------------------------------
-# Training utilities
-# -------------------------------
-def prepare_targets(batch_axis, max_h):
-    tensors, masks = [], []
-    for arr in batch_axis:
-        L = len(arr)
-        padded = np.pad(arr, (0, max_h - L), constant_values=0).astype(np.float32)
-        mask = np.zeros(max_h, dtype=np.float32)
-        mask[:L] = 1.0
-        tensors.append(torch.tensor(padded))
-        masks.append(torch.tensor(mask))
-    return torch.stack(tensors), torch.stack(masks)
+        # 5. è¾“å‡º Head
+        self.head = ResidualMLP(
+            input_dim=self.n_querys * self.hidden_dim,
+            hidden_dim=Config.MLP_HIDDEN_DIM,
+            output_dim=self.horizon * 2,
+            num_layers=Config.N_RES_BLOCKS,
+            dropout=0.2,
+        )
 
-def train_model(X_train, y_train, X_val, y_val, input_dim, horizon, config):
-    device = config.DEVICE
-    model = FusedTransformerModel(input_dim, horizon).to(device)
+    def forward(self, x: torch.Tensor, player_mask: torch.Tensor = None):
+        """Forward accepts either [B, T, D] or [B, P, T, D].
+
+        - If [B, T, D]: legacy single-player input.
+        - If [B, P, T, D]: play-level input with explicit player axis.
+        Anchored pooling uses the targeted player's last time step. We assume
+        targeted player is ordered as index 0 in the player axis.
+        """
+        if x.dim() == 3:
+            # Legacy path: [B, T, D]
+            B, T, _ = x.shape
+            x_embed = self.input_projection(x)  # [B, T, H]
+            x_embed = x_embed + self.pos_time[:, :T, :]
+            x_embed = self.embed_dropout(x_embed)
+
+            # Encode
+            h = self.transformer_encoder(x_embed)  # [B, T, H]
+            h = self.pool_ln(h)
+
+            # Anchor on last time step
+            ctx = h[:, -1, :]  # [B, H]
+
+            exp = self.n_querys * self.hidden_dim
+            if ctx.shape[-1] != exp:
+                if ctx.shape[-1] == self.hidden_dim:
+                    ctx = ctx.repeat(1, self.n_querys)
+                elif ctx.shape[-1] < exp:
+                    pad = torch.zeros((ctx.shape[0], exp - ctx.shape[-1]), device=ctx.device, dtype=ctx.dtype)
+                    ctx = torch.cat([ctx, pad], dim=-1)
+                else:
+                    ctx = ctx[:, :exp]
+            out = self.head(ctx)
+            out = out.view(B, self.horizon, 2)
+            out = torch.cumsum(out, dim=1)
+            return out
+
+        elif x.dim() == 4:
+            # Play-level path: [B, P, T, D]
+            B, P, T, D = x.shape
+            x_proj = self.input_projection(x)  # [B, P, T, H]
+            pos_t = self.pos_time[:, :T, :].unsqueeze(1)  # [1, 1, T, H]
+            if getattr(Config, "USE_AXIAL_ATTENTION", False):
+                # Stage 1: temporal encoding per player
+                x_t = x_proj + pos_t
+                x_t = self.embed_dropout(x_t)
+                h_t = self.time_encoder(x_t.reshape(B * P, T, self.hidden_dim))  # [BP, T, H]
+                h_t = h_t.reshape(B, P, T, self.hidden_dim)
+
+                # Stage 2: player-axis encoding at last time step
+                h_last = h_t[:, :, T - 1, :]  # [B, P, H]
+                pos_p = self.pos_player[:, :P, :]  # [1, P, H]
+                h_players = self.embed_dropout(h_last + pos_p)
+
+                pad_players = None
+                if player_mask is not None and player_mask.dim() == 2:
+                    pad_players = (player_mask == 0)  # [B, P] bool
+                h_players = self.player_encoder(h_players, src_key_padding_mask=pad_players)  # [B, P, H]
+                h_players = self.pool_ln(h_players)
+
+                # Multi-query pooling
+                q_idxs = [0]
+                # ball token assumed appended as last index when enabled
+                if getattr(Config, "ADD_BALL_TOKEN", False) and P >= (Config.MAX_PLAYER + 1):
+                    q_idxs.append(P - 1)
+                if len(q_idxs) < self.n_querys and P > 1:
+                    q_idxs.append(1)
+                q_idxs = q_idxs[: self.n_querys]
+                ctx = torch.cat([h_players[:, qi, :] for qi in q_idxs], dim=-1)  # [B, nq*H]
+            else:
+                # Fallback: flattened PT attention
+                pos_p = self.pos_player[:, :P, :].unsqueeze(2)  # [1, P, 1, H]
+                x_embed = self.embed_dropout(x_proj + pos_t + pos_p)
+                x_tok = x_embed.reshape(B, P * T, self.hidden_dim)
+                pad_mask = None
+                if player_mask is not None:
+                    if player_mask.dim() == 2:
+                        pm = player_mask.unsqueeze(-1).expand(B, P, T)
+                    else:
+                        pm = player_mask
+                    pad_mask = (pm.reshape(B, P * T) == 0)
+                h = self.transformer_encoder(x_tok, src_key_padding_mask=pad_mask)
+                h = self.pool_ln(h)
+                anchor_idx = T - 1
+                ctx = h[:, anchor_idx, :]
+
+            exp = self.n_querys * self.hidden_dim
+            if ctx.shape[-1] != exp:
+                if ctx.shape[-1] == self.hidden_dim:
+                    ctx = ctx.repeat(1, self.n_querys)
+                elif ctx.shape[-1] < exp:
+                    pad = torch.zeros((ctx.shape[0], exp - ctx.shape[-1]), device=ctx.device, dtype=ctx.dtype)
+                    ctx = torch.cat([ctx, pad], dim=-1)
+                else:
+                    ctx = ctx[:, :exp]
+            out = self.head(ctx)
+            out = out.view(B, self.horizon, 2)
+            out = torch.cumsum(out, dim=1)
+            return out
+        else:
+            raise ValueError(f"Unsupported input shape: {x.shape}")
+
+
+# === Training & Evaluation ===
+def train_model_stt(
+    X_train,
+    y_train_dx,
+    y_train_dy,
+    X_val,
+    y_val_dx,
+    y_val_dy,
+    input_dim,
+    pm_train=None,
+    pm_val=None,
+):
+    device = Config.DEVICE
+    print(f"[Device] Training on {device}")
+
+    # Construct train/val dataset
+    train_batches = []
+    for i in range(0, len(X_train), Config.BATCH_SIZE):
+        end = min(i + Config.BATCH_SIZE, len(X_train))
+        bx = torch.tensor(np.stack(X_train[i:end]).astype(np.float32))
+        by, bm = prepare_targets_stt(
+            [y_train_dx[j] for j in range(i, end)],
+            [y_train_dy[j] for j in range(i, end)],
+            Config.MAX_FUTURE_HORIZON,
+        )
+        if pm_train is not None:
+            pm = torch.tensor(np.stack(pm_train[i:end]).astype(np.float32))
+        else:
+            pm = None
+        train_batches.append((bx, by, bm, pm))
+
+    val_batches = []
+    for i in range(0, len(X_val), Config.BATCH_SIZE):
+        end = min(i + Config.BATCH_SIZE, len(X_val))
+        bx = torch.tensor(np.stack(X_val[i:end]).astype(np.float32))
+        by, bm = prepare_targets_stt(
+            [y_val_dx[j] for j in range(i, end)],
+            [y_val_dy[j] for j in range(i, end)],
+            Config.MAX_FUTURE_HORIZON,
+        )
+        if pm_val is not None:
+            pm = torch.tensor(np.stack(pm_val[i:end]).astype(np.float32))
+        else:
+            pm = None
+        val_batches.append((bx, by, bm, pm))
+
+    # Define model, criterion, optimizer, scheduler
+    model = STTransformer(
+        input_dim=input_dim,
+    ).to(device)
     criterion = TemporalHuber(delta=0.5, time_decay=0.03)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5, verbose=False)
-    
-    # Mixed precision training (from nn-gru2.py)
-    scaler = GradScaler()
 
-    def build_batches(X, Y):
-        batches = []
-        B = config.BATCH_SIZE
-        for i in range(0, len(X), B):
-            end = min(i + B, len(X))
-            xs = torch.tensor(np.stack(X[i:end]).astype(np.float32))
-            ys, ms = prepare_targets([Y[j] for j in range(i, end)], horizon)
-            batches.append((xs, ys, ms))
-        return batches
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-5
+    )
+    # total_steps = Config.EPOCHS * len(train_batches)
+    # warmup_steps = int(0.1 * total_steps)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, patience=5, factor=0.5
+    )
+    best_loss, best_state, bad = float("inf"), None, 0
+    start_time = time.time()
 
-    tr_batches = build_batches(X_train, y_train)
-    va_batches = build_batches(X_val,   y_val)
-
-    best_loss, best_state, bad = float('inf'), None, 0
-    for epoch in range(1, config.EPOCHS + 1):
+    for epoch in range(1, Config.EPOCHS + 1):
         model.train()
         train_losses = []
-        for bx, by, bm in tr_batches:
+        for bx, by, bm, pm in train_batches:
             bx, by, bm = bx.to(device), by.to(device), bm.to(device)
-            
+            pm = pm.to(device) if pm is not None else None
+            pred = model(bx, player_mask=pm)
+            loss = criterion(pred, by, bm)
+
             optimizer.zero_grad()
-            
-            with autocast():
-                pred = model(bx)
-                loss = criterion(pred, by, bm)
-            
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+            loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
-            
+
+            optimizer.step()
+            # scheduler.step()
             train_losses.append(loss.item())
 
         model.eval()
         val_losses = []
+        # Accumulate squared error for RMSE calculation across all validation batches
+        se_sum = 0.0
+        denom_sum = 0.0
         with torch.no_grad():
-            for bx, by, bm in va_batches:
+            for bx, by, bm, pm in val_batches:
                 bx, by, bm = bx.to(device), by.to(device), bm.to(device)
-                
-                with autocast():
-                    pred = model(bx)
-                    val_losses.append(criterion(pred, by, bm).item())
+                pm = pm.to(device) if pm is not None else None
+                pred = model(bx, player_mask=pm)
+                val_losses.append(criterion(pred, by, bm).item())
+                # Compute RMSE components on this batch
+                pdx, pdy = pred[..., 0], pred[..., 1]
+                ydx, ydy = by[..., 0], by[..., 1]
+                mask = bm
+                se_batch = ((pdx - ydx) ** 2 + (pdy - ydy) ** 2) * mask
+                se_sum += float(se_batch.sum().item())
+                denom_sum += float(mask.sum().item())
 
-        trl, val = float(np.mean(train_losses)), float(np.mean(val_losses))
-        scheduler.step(val)
-        if epoch % 10 == 0:
-            print(f"  Epoch {epoch}: train={trl:.4f}, val={val:.4f}")
+        train_loss, val_loss = np.mean(train_losses), np.mean(val_losses)
+        scheduler.step(val_loss)
 
-        if val < best_loss:
-            best_loss, bad = val, 0
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        # Compute epoch RMSE over validation set
+        rmse_val = float(np.sqrt(se_sum / (2.0 * (denom_sum + 1e-8)))) if denom_sum > 0 else float('nan')
+
+        total_time = time.time() - start_time
+        minutes = int(total_time // 60)
+        seconds = int(total_time % 60)
+        print(
+            f"  Epoch {epoch:>3}: train={train_loss:.4f}, val={val_loss:.4f}, rmse={rmse_val:.4f}, "
+            f"Time_elapsed={minutes:>2}min {seconds:>2}s"
+        )
+
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            bad = 0
         else:
             bad += 1
-            if bad >= config.PATIENCE:
+            if bad >= Config.PATIENCE:
                 print(f"  Early stop at epoch {epoch}")
                 break
 
     if best_state:
         model.load_state_dict(best_state)
+
     return model, best_loss
 
-# -------------------------------
-# Main pipeline
-# -------------------------------
-class CFG(Config):
-    SEEDS = [42]  # Can add more seeds for ensemble
 
-def main():
-    cfg = CFG()
-    print("="*80)
-    print(f"FUSED TRANSFORMER PIPELINE")
-    print("="*80)
-    print(f"Seeds: {cfg.SEEDS}")
-    print(f"cuDF backend active: {USE_CUDF}")
+def compute_val_rmse_stt(model, X_val_sc, ydx_list, ydy_list, horizon, device, pm_val=None):
+    """Compute RMSE over validation sequences for STTransformer outputs.
 
-    # Load data
-    print("\n[1/4] Loading data...")
-    train_input_files  = [cfg.DATA_DIR / f"train/input_2023_w{w:02d}.csv"  for w in range(1, 19)]
-    train_output_files = [cfg.DATA_DIR / f"train/output_2023_w{w:02d}.csv" for w in range(1, 19)]
-    train_input  = pd.concat([pd.read_csv(f) for f in train_input_files  if f.exists()], ignore_index=True)
-    train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()], ignore_index=True)
-    test_input     = pd.read_csv(cfg.DATA_DIR / "test_input.csv")
-    test_template  = pd.read_csv(cfg.DATA_DIR / "test.csv")
+    Parameters
+    - model: trained STTransformer
+    - X_val_sc: list or np.array of standardized input sequences
+    - ydx_list, ydy_list: lists of target dx/dy arrays per sequence
+    - horizon: prediction horizon length
+    - device: torch device
+    """
+    # stack list -> np.array
+    if isinstance(X_val_sc, list):
+        X_val_sc = np.stack(X_val_sc).astype(np.float32)
 
-    # Prepare sequences
-    print("\n[2/4] Building sequences with fused features...")
-    seqs, tdx, tdy, tfids, seq_meta, feat_cols, dir_map = prepare_sequences_with_advanced_features(
-        train_input, output_df=train_output, is_training=True,
-        window_size=cfg.WINDOW_SIZE
-    )
+    X_t = torch.tensor(X_val_sc, dtype=torch.float32).to(device)
+    PM_t = None
+    if pm_val is not None:
+        PM_t = torch.tensor(np.stack(pm_val).astype(np.float32)).to(device)
 
-    sequences = list(seqs)
-    targets_dx = list(tdx)
-    targets_dy = list(tdy)
+    with torch.no_grad():
+        predict = model(X_t, player_mask=PM_t).cpu().numpy()  # [B, H, 2]
 
-    # Training
-    print("\n[3/4] Training fused models...")
-    
-    all_models_x, all_models_y, all_scalers = [], [], []
-    fold_rmse_list = []
-    
-    groups = np.array([d['game_id'] for d in seq_meta])
-    
-    for seed in cfg.SEEDS:
-        print(f"\n{'='*70}\nTraining with Seed: {seed}\n{'='*70}")
-        set_seed(seed)
-        
-        gkf = GroupKFold(n_splits=cfg.N_FOLDS)
+    # targets & mask
+    by, bm = prepare_targets_stt(ydx_list, ydy_list, horizon)
+    if torch.is_tensor(by):
+        by = by.numpy()
+    if torch.is_tensor(bm):
+        bm = bm.numpy()
 
-        for fold, (tr, va) in enumerate(gkf.split(sequences, groups=groups), 1):
-            print(f"\n{'-'*60}\nFold {fold}/{cfg.N_FOLDS} for seed {seed}\n{'-'*60}")
+    pdx, pdy = predict[..., 0], predict[..., 1]
+    ydx, ydy = by[..., 0], by[..., 1]
+    mask = bm
 
-            X_tr = [sequences[i] for i in tr]
-            X_va = [sequences[i] for i in va]
+    # squared error
+    se_sum2d = ((pdx - ydx) ** 2 + (pdy - ydy) ** 2) * mask
+    denom = mask.sum() + 1e-8
 
-            scaler = StandardScaler()
+    return float(np.sqrt(se_sum2d.sum() / (2.0 * denom)))
+
+
+def train_all_folds_stt(
+    gkf, sequences, groups, targets_dx, targets_dy, seed, input_dim, player_masks=None
+):
+    fold_rmses = []
+    all_rmse = []
+    cv_log = []
+
+    for fold, (tr, va) in enumerate(gkf.split(sequences, y=None, groups=groups), 1):
+        print(f"\n{'-'*60}\nFold {fold}/{Config.N_FOLDS} (seed {seed})\n{'-'*60}")
+
+        X_tr = [sequences[i] for i in tr]
+        X_va = [sequences[i] for i in va]
+        PM_tr = [player_masks[i] for i in tr] if player_masks is not None else None
+        PM_va = [player_masks[i] for i in va] if player_masks is not None else None
+        y_tr_dx = [targets_dx[i] for i in tr]
+        y_va_dx = [targets_dx[i] for i in va]
+        y_tr_dy = [targets_dy[i] for i in tr]
+        y_va_dy = [targets_dy[i] for i in va]
+
+        scaler = StandardScaler()
+        # Fit scaler over feature dimension using flattened player×time tokens when necessary
+        if X_tr and np.array(X_tr[0]).ndim == 3:
+            # [P, T, D] -> [-1, D]
+            scaler.fit(np.vstack([s.reshape(-1, s.shape[-1]) for s in X_tr]))
+        else:
             scaler.fit(np.vstack([s for s in X_tr]))
 
-            X_tr_sc = np.stack([scaler.transform(s) for s in X_tr]).astype(np.float32)
-            X_va_sc = np.stack([scaler.transform(s) for s in X_va]).astype(np.float32)
+        if X_tr and np.array(X_tr[0]).ndim == 3:
+            X_tr_sc = [scaler.transform(s.reshape(-1, s.shape[-1])).reshape(s.shape) for s in X_tr]
+            X_va_sc = [scaler.transform(s.reshape(-1, s.shape[-1])).reshape(s.shape) for s in X_va]
+        else:
+            X_tr_sc = [scaler.transform(s) for s in X_tr]
+            X_va_sc = [scaler.transform(s) for s in X_va]
 
-            # Train X model
-            print("Training ΔX model...")
-            mx, loss_x = train_model(
-                X_tr_sc, [targets_dx[i] for i in tr],
-                X_va_sc, [targets_dx[i] for i in va],
-                X_tr_sc.shape[-1], cfg.MAX_FUTURE_HORIZON, cfg
-            )
+        model, loss = train_model_stt(
+            X_tr_sc,
+            y_tr_dx,
+            y_tr_dy,
+            X_va_sc,
+            y_va_dx,
+            y_va_dy,
+            input_dim,
+            pm_train=PM_tr,
+            pm_val=PM_va,
+        )
 
-            # Train Y model
-            print("Training ΔY model...")
-            my, loss_y = train_model(
-                X_tr_sc, [targets_dy[i] for i in tr],
-                X_va_sc, [targets_dy[i] for i in va],
-                X_tr_sc.shape[-1], cfg.MAX_FUTURE_HORIZON, cfg
-            )
-            
-            all_models_x.append(mx)
-            all_models_y.append(my)
-            all_scalers.append(scaler)
-            
-            # Calculate RMSE
-            mx.eval()
-            my.eval()
-            with torch.no_grad():
-                X_va_t = torch.tensor(X_va_sc).to(cfg.DEVICE)
-                pred_dx = mx(X_va_t).cpu().numpy()
-                pred_dy = my(X_va_t).cpu().numpy()
-            
-            y_va_dx = [targets_dx[i] for i in va]
-            y_va_dy = [targets_dy[i] for i in va]
-            
-            squared_errors = []
-            for i in range(len(pred_dx)):
-                target_dx_full, mask_dx = prepare_targets([y_va_dx[i]], cfg.MAX_FUTURE_HORIZON)
-                target_dy_full, mask_dy = prepare_targets([y_va_dy[i]], cfg.MAX_FUTURE_HORIZON)
-                
-                target_dx_arr = target_dx_full[0].cpu().numpy()
-                target_dy_arr = target_dy_full[0].cpu().numpy()
-                mask_arr = mask_dx[0].cpu().numpy()
-                
-                valid_indices = mask_arr > 0
-                if valid_indices.sum() > 0:
-                    dx_error = (pred_dx[i][valid_indices] - target_dx_arr[valid_indices]) ** 2
-                    dy_error = (pred_dy[i][valid_indices] - target_dy_arr[valid_indices]) ** 2
-                    squared_errors.extend(dx_error + dy_error)
-            
-            fold_rmse = np.sqrt(np.mean(squared_errors) / 2)
-            fold_rmse_list.append(fold_rmse)
-            
-            print(f"Fold {fold} (seed {seed}) — val loss: dx={loss_x:.5f}, dy={loss_y:.5f} | RMSE={fold_rmse:.5f}")
+        rmse = compute_val_rmse_stt(
+            model,
+            X_va_sc,
+            [targets_dx[i] for i in va],
+            [targets_dy[i] for i in va],
+            Config.MAX_FUTURE_HORIZON,
+            Config.DEVICE,
+            pm_val=PM_va,
+        )
 
-    # RMSE statistics
-    rmse_mean = np.mean(fold_rmse_list)
-    rmse_std = np.std(fold_rmse_list)
-    
-    print("\n" + "="*80)
-    print("FUSED MODEL RMSE STATISTICS")
-    print("="*80)
-    for i, rmse in enumerate(fold_rmse_list, 1):
-        print(f"Fold {i}: RMSE = {rmse:.5f}")
-    print("-"*80)
-    print(f"RMSE Mean: {rmse_mean:.5f}")
-    print(f"RMSE Std: {rmse_std:.5f}")
-    print("="*80)
+        print(
+            f"[VAL] seed {seed} fold {fold} at "
+            f"Huber loss={loss:.5f} | "
+            f"RMSE={rmse:.4f}"
+        )
 
-    # Test predictions
-    print(f"\n[4/4] Creating test predictions with {len(all_models_x)} models...")
-    test_seqs, test_meta, feat_cols_t, dir_map_test = prepare_sequences_with_advanced_features(
-        test_input, test_template=test_template, is_training=False,
-        window_size=cfg.WINDOW_SIZE
+        fold_rmses.append(rmse)
+        all_rmse.append(rmse)
+        cv_log.append(
+            {
+                "seed": seed,
+                "fold": fold,
+                "rmse": rmse,
+                "loss": float(loss),
+            }
+        )
+
+        # Save model
+        save_fold_artifacts_stt(
+            seed=seed,
+            fold=fold,
+            scaler=scaler,
+            model=model,
+            base_dir=Config.SAVE_DIR,
+        )
+
+    print(
+        f"[SEED SUMMARY] seed {seed} RMSEs: {[f'{r:.4f}' for r in fold_rmses]} | "
+        f"mean={float(np.mean(fold_rmses)):.4f} yards"
     )
-    assert feat_cols_t == feat_cols, "Train/Test feature columns mismatch!"
 
-    idx_x = feat_cols.index('x')
-    idx_y = feat_cols.index('y')
+    return all_rmse, cv_log
 
-    X_test_raw = list(test_seqs)
-    x_last_uni = np.array([s[-1, idx_x] for s in X_test_raw], dtype=np.float32)
-    y_last_uni = np.array([s[-1, idx_y] for s in X_test_raw], dtype=np.float32)
+def predict_sst(model, scaler, X_test_raw, device, pm_test=None):
+    model.eval()
+    outs_dx, outs_dy = [], []
 
-    # Ensemble predictions
-    all_preds_dx, all_preds_dy = [], []
-    
-    for mx, my, sc in zip(all_models_x, all_models_y, all_scalers):
-        X_sc = np.stack([sc.transform(s) for s in X_test_raw]).astype(np.float32)
-        X_t = torch.tensor(X_sc).to(cfg.DEVICE)
-        mx.eval()
-        my.eval()
-        with torch.no_grad():
-            all_preds_dx.append(mx(X_t).cpu().numpy())
-            all_preds_dy.append(my(X_t).cpu().numpy())
+    # Support both [T, D] and [P, T, D]
+    if X_test_raw and np.array(X_test_raw[0]).ndim == 3:
+        base = np.stack([
+            scaler.transform(s.reshape(-1, s.shape[-1])).reshape(s.shape)
+            for s in X_test_raw
+        ]).astype(np.float32)
+    else:
+        base = np.stack([scaler.transform(s) for s in X_test_raw]).astype(np.float32)
+    xt = torch.tensor(base, device=device)
+    pm_t = None
+    if pm_test is not None:
+        pm_t = torch.tensor(np.stack(pm_test).astype(np.float32), device=device)
 
-    ens_dx = np.mean(all_preds_dx, axis=0)
-    ens_dy = np.mean(all_preds_dy, axis=0)
-    H = ens_dx.shape[1]
+    with torch.no_grad():
+        output = model(xt, player_mask=pm_t)
 
-    # Create submission with direction inversion
-    rows = []
-    tt_idx = test_template.set_index(['game_id','play_id','nfl_id']).sort_index()
+        dx = output[:, :, 0]
+        dy = output[:, :, 1]
 
-    for i, meta in enumerate(test_meta):
-        gid = meta['game_id']; pid = meta['play_id']; nid = meta['nfl_id']
-        play_dir = meta['play_direction']
-        play_is_right = (play_dir == 'right')
+    outs_dx.append(dx.detach().cpu().numpy())
+    outs_dy.append(dy.detach().cpu().numpy())
 
-        try:
-            fids = tt_idx.loc[(gid,pid,nid),'frame_id']
-            if isinstance(fids, pd.Series):
-                fids = fids.sort_values().tolist()
-            else:
-                fids = [int(fids)]
-        except KeyError:
+    return np.mean(outs_dx, axis=0), np.mean(outs_dy, axis=0)
+
+# === Data Preparation ===
+def _canonicalize_key_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for c in ("game_id", "play_id", "nfl_id"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    # Handle missing keys
+    df = df.dropna(subset=["game_id", "play_id", "nfl_id"])
+    # Convert to int64?
+    df["game_id"] = df["game_id"].astype("int64")
+    df["play_id"] = df["play_id"].astype("int64")
+    df["nfl_id"] = df["nfl_id"].astype("int64")
+    return df
+
+
+def _process_group_batch(
+    batch_keys: list,
+    grouped_dict: dict,
+    feature_cols: list,
+    target_rows: pd.DataFrame,
+    idx_x: int,
+    idx_y: int,
+    dir_map: pd.DataFrame,
+    queue: Queue,
+):
+    sequences, targets_dx, targets_dy, targets_fids, seq_meta = [], [], [], [], []
+    for key in batch_keys:
+        gid, pid, nid = key
+        group_df = grouped_dict.get(key)
+        if group_df is None:
             continue
 
-        for t, fid in enumerate(fids):
-            tt = min(t, H - 1)
-            x_uni = np.clip(x_last_uni[i] + ens_dx[i, tt], 0, FIELD_LENGTH)
-            y_uni = np.clip(y_last_uni[i] + ens_dy[i, tt], 0, FIELD_WIDTH)
-            x_out, y_out = invert_to_original_direction(x_uni, y_uni, play_is_right)
+        # Build input window
+        input_window = group_df.tail(Config.WINDOW_SIZE)
+        if len(input_window) < Config.WINDOW_SIZE:
+            pad_len = Config.WINDOW_SIZE - len(input_window)
+            pad_df = pd.DataFrame(
+                np.nan, index=range(pad_len), columns=input_window.columns
+            )
+            input_window = pd.concat([pad_df, input_window], ignore_index=True)
 
-            rows.append({
-                'id': f"{gid}_{pid}_{nid}_{int(fid)}",
-                'x': x_out,
-                'y': y_out
-            })
+        input_window = input_window.fillna(input_window.mean(numeric_only=True))
+        seq = input_window[feature_cols].to_numpy(dtype=np.float32)
+        seq = np.nan_to_num(seq, nan=0.0)
+        sequences.append(seq)
+
+        # Training targets
+        if Config.TRAIN:
+            out_grp: pd.DataFrame = target_rows[
+                (target_rows["game_id"] == gid)
+                & (target_rows["play_id"] == pid)
+                & (target_rows["nfl_id"] == nid)
+            ].sort_values("frame_id")
+            if len(out_grp) == 0:
+                sequences.pop()
+                continue
+            dx = out_grp["x"].to_numpy(np.float32) - seq[-1, idx_x]
+            dy = out_grp["y"].to_numpy(np.float32) - seq[-1, idx_y]
+            fids = out_grp["frame_id"].to_numpy(np.int32)
+            targets_dx.append(dx)
+            targets_dy.append(dy)
+            targets_fids.append(fids)
+
+        play_dir_val = dir_map.loc[(gid, pid)]
+        seq_meta.append(
+            {
+                "game_id": gid,
+                "play_id": pid,
+                "nfl_id": nid,
+                "frame_id": int(input_window.iloc[-1]["frame_id"]),
+                "play_direction": play_dir_val,
+            }
+        )
+
+        if queue is not None:
+            queue.put(1)
+
+    return sequences, targets_dx, targets_dy, targets_fids, seq_meta
+
+
+def prepare_sequences_with_advanced_features(
+    input_df: pd.DataFrame,
+    output_df: pd.DataFrame,
+    feature_groups: list = None,
+):
+
+    print(f"\n{'='*80}")
+    print(f"PREPARING SEQUENCES WITH ADVANCED FEATURES (UNIFIED FRAME)")
+    print(f"{'='*80}")
+    print(f"Window size: {Config.WINDOW_SIZE}")
+
+    input_df = _canonicalize_key_dtypes(input_df)
+    output_df = _canonicalize_key_dtypes(output_df)
+
+    dir_map = build_play_direction_map(input_df)
+    input_df = unify_left_direction_ipt(input_df)
+    output_df = unify_left_direction_opt(output_df, dir_map)
+
+    target_rows = output_df
+    target_groups = output_df[["game_id", "play_id", "nfl_id"]].drop_duplicates()
+
+    # Feature Engineering
+    fe = FeatureEngineer(feature_groups)
+    processed_df, base_feature_cols = fe.transform(input_df)
+
+    # Build sequences
+    start_time = time.time()
+    grouped_dict = {
+        (gid, pid, nid): g
+        for (gid, pid, nid), g in processed_df.groupby(
+            ["game_id", "play_id", "nfl_id"], sort=False
+        )
+    }
+
+    idx_x = base_feature_cols.index("x")
+    idx_y = base_feature_cols.index("y")
+
+    # Spread group across cpus
+    all_keys = [tuple(x) for x in target_groups.to_numpy()]
+    batch_size = (len(all_keys) + Config.MAX_WORKER - 1) // Config.MAX_WORKER
+    batches = [
+        all_keys[i : i + batch_size] for i in range(0, len(all_keys), batch_size)
+    ]
+
+    sequences, targets_dx, targets_dy, targets_fids, seq_meta = [], [], [], [], []
+
+    if Config.TRAIN:
+        manager = Manager()
+        queue = manager.Queue()
+        pbar = tqdm(total=len(all_keys), desc="Creating sequences (groups)")
+
+        # Build sequences in parallel
+        with ProcessPoolExecutor(max_workers=Config.MAX_WORKER) as ex:
+            futures = [
+                ex.submit(
+                    _process_group_batch,
+                    b,
+                    grouped_dict,
+                    base_feature_cols,
+                    target_rows,
+                    idx_x,
+                    idx_y,
+                    dir_map,
+                    queue,
+                )
+                for b in batches
+            ]
+            finished = 0
+            while finished < len(all_keys):
+                queue.get()
+                finished += 1
+                pbar.update(1)
+
+            # Wait for all task to complete
+            for fut in as_completed(futures):
+                seqs, dxs, dys, fids_list, metas = fut.result()
+                sequences.extend(seqs)
+                targets_dx.extend(dxs)
+                targets_dy.extend(dys)
+                targets_fids.extend(fids_list)
+                seq_meta.extend(metas)
+
+        pbar.close()
+
+    else:
+        # No multiprocessing when not training
+        print("[INFO] Running in single-process mode")
+        pbar = tqdm(total=len(all_keys), desc="Creating sequences (groups)")
+        for key in all_keys:
+            seqs, dxs, dys, fids_list, metas = _process_group_batch(
+                [key],
+                grouped_dict,
+                base_feature_cols,
+                target_rows,
+                idx_x,
+                idx_y,
+                dir_map,
+                None,
+            )
+            sequences.extend(seqs)
+            seq_meta.extend(metas)
+            pbar.update(1)
+        pbar.close()
+    end_time = time.time()
+    print(f"Created {len(sequences)} sequences with {len(base_feature_cols)} features each")
+    print(f"Time to build sequences: {end_time - start_time:.2f} seconds")
+
+    if Config.TRAIN:
+        return (
+            sequences,
+            targets_dx,
+            targets_dy,
+            targets_fids,
+            seq_meta,
+            base_feature_cols,
+        )
+    return sequences, seq_meta, base_feature_cols
+
+
+def _order_players_for_play(play_df: pd.DataFrame, target_nfl_id: int, end_frame: int) -> list:
+    """Order players so that target comes first, followed by nearest players at end_frame."""
+    # last positions per player at end_frame
+    last = (
+        play_df[play_df["frame_id"] == end_frame]
+        .groupby("nfl_id", as_index=False)[["x", "y", "player_side"]]
+        .first()
+    )
+    # target first
+    if target_nfl_id not in set(last["nfl_id"].tolist()):
+        # fallback to first in play_df
+        target_nfl_id = int(play_df["nfl_id"].iloc[0])
+    tx = float(last.loc[last["nfl_id"] == target_nfl_id, "x"].values[0])
+    ty = float(last.loc[last["nfl_id"] == target_nfl_id, "y"].values[0])
+    last["dist2target"] = np.hypot(last["x"] - tx, last["y"] - ty)
+    other_ids = last[last["nfl_id"] != target_nfl_id].sort_values("dist2target")[
+        "nfl_id"
+    ].tolist()
+    ordered = [target_nfl_id] + other_ids
+    return ordered
+
+
+def prepare_sequences_play_level(
+    input_df: pd.DataFrame,
+    output_df: pd.DataFrame,
+    feature_groups: list = None,
+):
+    """Build play-level sequences with explicit player axis: [P, T, D].
+
+    Returns (when training):
+    - sequences_4d: list of [P, T, D]
+    - targets_dx, targets_dy: lists of target receiver dx/dy arrays
+    - targets_fids: lists of frame_ids for targets
+    - seq_meta: per-play metadata
+    - feature_cols: list of feature names (same as FeatureEngineer output)
+    - player_masks: list of [P] masks indicating valid players
+    """
+    print(f"\n{'='*80}")
+    print(f"PREPARING PLAY-LEVEL SEQUENCES (PLAYER × TIME × FEATURES)")
+    print(f"{'='*80}")
+    print(f"Window size: {Config.WINDOW_SIZE} | Max players: {Config.MAX_PLAYER}")
+
+    input_df = _canonicalize_key_dtypes(input_df)
+    output_df = _canonicalize_key_dtypes(output_df)
+
+    dir_map = build_play_direction_map(input_df)
+    input_df = unify_left_direction_ipt(input_df)
+    output_df = unify_left_direction_opt(output_df, dir_map)
+
+    # Feature Engineering
+    fe = FeatureEngineer(feature_groups)
+    processed_df, base_feature_cols = fe.transform(input_df)
+
+    # helpful indices for x,y
+    idx_x = base_feature_cols.index("x")
+    idx_y = base_feature_cols.index("y")
+
+    sequences, player_masks, targets_dx, targets_dy, targets_fids, seq_meta = (
+        [], [], [], [], [], []
+    )
+
+    # Iterate per (game_id, play_id)
+    for (gid, pid), play_df in processed_df.groupby(["game_id", "play_id"], sort=False):
+        play_df = play_df.sort_values(["nfl_id", "frame_id"]).reset_index(drop=True)
+        end_frame = int(play_df["frame_id"].max())
+        start_frame = max(end_frame - Config.WINDOW_SIZE + 1, int(play_df["frame_id"].min()))
+
+        # Determine targeted receiver
+        tr_ids = (
+            play_df.loc[play_df["player_role"] == "Targeted Receiver", "nfl_id"].unique()
+        )
+        if len(tr_ids) == 0:
+            # skip plays without targeted receiver
+            continue
+        target_nfl_id = int(tr_ids[0])
+
+        # Order players: target first, then nearest at end_frame
+        ordered_ids = _order_players_for_play(play_df, target_nfl_id, end_frame)
+        selected_ids = ordered_ids[: Config.MAX_PLAYER]
+
+        # Build per-player window and pad
+        P = Config.MAX_PLAYER
+        T = Config.WINDOW_SIZE
+        D_base = len(base_feature_cols)
+        play_tensor = np.zeros((P, T, D_base), dtype=np.float32)
+        player_mask = np.zeros((P,), dtype=np.float32)
+
+        # For reference: target last x,y for target alignment of targets
+        ref_x, ref_y = None, None
+
+        for p_idx in range(P):
+            if p_idx >= len(selected_ids):
+                # padded player
+                continue
+            nid = selected_ids[p_idx]
+            sub = play_df[(play_df["nfl_id"] == nid) & (play_df["frame_id"].between(start_frame, end_frame))]
+            # If fewer frames, pad at front
+            if len(sub) < T:
+                pad_len = T - len(sub)
+                pad_df = pd.DataFrame(np.nan, index=range(pad_len), columns=sub.columns)
+                sub = pd.concat([pad_df, sub], ignore_index=True)
+
+            sub = sub.fillna(sub.mean(numeric_only=True))
+            seq = sub[base_feature_cols].to_numpy(dtype=np.float32)
+            seq = np.nan_to_num(seq, nan=0.0)
+
+            play_tensor[p_idx] = seq[-T:]  # ensure exact window length
+            player_mask[p_idx] = 1.0
+
+            if nid == target_nfl_id:
+                ref_x = float(seq[-1, idx_x])
+                ref_y = float(seq[-1, idx_y])
+
+        if ref_x is None or ref_y is None:
+            # if target not found in window, skip
+            continue
+
+        # Targets for targeted receiver
+        out_grp = (
+            output_df[(output_df["game_id"] == gid) & (output_df["play_id"] == pid) & (output_df["nfl_id"] == target_nfl_id)]
+            .sort_values("frame_id")
+        )
+        if len(out_grp) == 0:
+            # skip if no target rows
+            continue
+        dx = out_grp["x"].to_numpy(np.float32) - np.float32(ref_x)
+        dy = out_grp["y"].to_numpy(np.float32) - np.float32(ref_y)
+        fids = out_grp["frame_id"].to_numpy(np.int32)
+
+        # --- Step 4 (optional): time-varying neighbor features per frame ---
+        try:
+            # Player sides (ally/opp) inferred from last frame
+            sides_last = (
+                play_df[play_df["frame_id"] == end_frame]
+                .groupby("nfl_id", as_index=False)["player_side"]
+                .first()
+            )
+            side_map = {int(r["nfl_id"]): str(r["player_side"]) for _, r in sides_last.iterrows()}
+            sides = [side_map.get(int(nid), "Offense") for nid in selected_ids]  # default Offense
+
+            # Positions per frame
+            X = play_tensor[:, :, idx_x]  # [P, T]
+            Y = play_tensor[:, :, idx_y]  # [P, T]
+            tv_pressure = np.zeros((P, T), dtype=np.float32)
+            tv_ally_density = np.zeros((P, T), dtype=np.float32)
+            tv_oppn_density = np.zeros((P, T), dtype=np.float32)
+            tv_density_ratio = np.zeros((P, T), dtype=np.float32)
+            tv_dist_min = np.zeros((P, T), dtype=np.float32)
+
+            R = float(getattr(Config, "RADIUS", 30.0))
+            for t in range(T):
+                # collect valid players at time t
+                valid_idx = [i for i in range(P) if player_mask[i] > 0.5]
+                if len(valid_idx) <= 1:
+                    continue
+                coords = np.stack([X[valid_idx, t], Y[valid_idx, t]], axis=-1)  # [V, 2]
+                for loc_pos, i in enumerate(valid_idx):
+                    xi, yi = coords[loc_pos]
+                    # distances to all others
+                    diffs = coords - np.array([xi, yi], dtype=np.float32)
+                    dists = np.sqrt((diffs ** 2).sum(axis=-1) + 1e-8)
+                    dists[loc_pos] = np.inf  # exclude self
+                    tv_dist_min[i, t] = np.min(dists)
+
+                    # ally/opp masks based on player_side
+                    si = sides[loc_pos]
+                    ally_mask = np.array([1.0 if sides[j] == si else 0.0 for j in range(len(valid_idx))], dtype=np.float32)
+                    ally_mask[loc_pos] = 0.0
+                    opp_mask = 1.0 - ally_mask
+
+                    # density within radius R (count / area)
+                    ally_count = float(np.sum((dists <= R) * ally_mask))
+                    opp_count = float(np.sum((dists <= R) * opp_mask))
+                    area = np.pi * (R ** 2)
+                    tv_ally_density[i, t] = ally_count / (area + 1e-6)
+                    tv_oppn_density[i, t] = opp_count / (area + 1e-6)
+                    tv_density_ratio[i, t] = tv_ally_density[i, t] / (tv_oppn_density[i, t] + 1e-6)
+
+                    # pressure as inverse of nearest opponent distance
+                    opp_dists = dists[opp_mask > 0.5]
+                    if opp_dists.size == 0:
+                        opp_near = np.inf
+                    else:
+                        opp_near = float(np.min(opp_dists))
+                    tv_pressure[i, t] = 1.0 / max(opp_near, 0.5)
+
+            # concatenate new features to play_tensor along feature dimension
+            new_feats = np.stack(
+                [tv_pressure, tv_ally_density, tv_oppn_density, tv_density_ratio, tv_dist_min],
+                axis=-1,
+            )  # [P, T, 5]
+            play_tensor = np.concatenate([play_tensor, new_feats], axis=-1)
+        except Exception as e:
+            # Keep shapes consistent across plays by appending zeros if computation fails
+            print(f"[WARN] time-varying neighbor features failed for play ({gid}, {pid}): {e}")
+            zeros_feats = np.zeros((P, T, 5), dtype=np.float32)
+            play_tensor = np.concatenate([play_tensor, zeros_feats], axis=-1)
+
+        # Optionally append a shared ball token as an extra player
+        if getattr(Config, "ADD_BALL_TOKEN", False):
+            try:
+                bx_val = float(play_df["ball_land_x"].dropna().iloc[-1])
+                by_val = float(play_df["ball_land_y"].dropna().iloc[-1])
+            except Exception:
+                bx_val = float(play_df["x"].iloc[-1])
+                by_val = float(play_df["y"].iloc[-1])
+
+            D_total = int(play_tensor.shape[-1])
+            ball_seq = np.zeros((T, D_total), dtype=np.float32)
+
+            # Write into base feature indices for x/y and ball landing
+            bx_i = base_feature_cols.index("ball_land_x") if "ball_land_x" in base_feature_cols else None
+            by_i = base_feature_cols.index("ball_land_y") if "ball_land_y" in base_feature_cols else None
+            x_i = idx_x
+            y_i = idx_y
+            ball_seq[:, x_i] = bx_val
+            ball_seq[:, y_i] = by_val
+            if bx_i is not None:
+                ball_seq[:, bx_i] = bx_val
+            if by_i is not None:
+                ball_seq[:, by_i] = by_val
+
+            play_tensor = np.concatenate([play_tensor, ball_seq[np.newaxis, :, :]], axis=0)
+            player_mask = np.concatenate([player_mask, np.array([1.0], dtype=np.float32)], axis=0)
+
+        sequences.append(play_tensor)
+        player_masks.append(player_mask)
+        targets_dx.append(dx)
+        targets_dy.append(dy)
+        targets_fids.append(fids)
+        seq_meta.append({"game_id": gid, "play_id": pid, "target_nfl_id": target_nfl_id})
+
+    # Final feature columns include base + time-varying neighbor features appended to tensor
+    extra_cols = [
+        "tv_pressure",
+        "tv_ally_density",
+        "tv_oppn_density",
+        "tv_density_ratio",
+        "tv_dist_min",
+    ]
+    feature_cols_total = base_feature_cols + extra_cols
+
+    print(f"Created {len(sequences)} play-level sequences with shape [P={Config.MAX_PLAYER}, T={Config.WINDOW_SIZE}, D={len(feature_cols_total)}]")
+
+    if Config.TRAIN:
+        return (
+            sequences,
+            targets_dx,
+            targets_dy,
+            targets_fids,
+            seq_meta,
+            feature_cols_total,
+            player_masks,
+        )
+    return sequences, seq_meta, feature_cols_total, player_masks
+
+
+def train():
+    # 1) load training data
+    print("\n[1/4] Loading training data")
+    train_input, train_output = load_input_output()
+
+    # 2) features + sequences
+    print("\n[2/4] Feature Engineering")
+    feature_groups = Config.FEATURE_GROUPS
+    if getattr(Config, "USE_PLAY_PLAYER_INPUT", False):
+        seqs, tdx, tdy, tfids, seq_meta, feat_cols, pmasks = (
+            prepare_sequences_play_level(
+                train_input,
+                output_df=train_output,
+                feature_groups=feature_groups,
+            )
+        )
+        input_dim = seqs[0].shape[-1]
+        sequences = list(seqs)
+        targets_dx = list(tdx)
+        targets_dy = list(tdy)
+        player_masks = list(pmasks)
+    else:
+        seqs, tdx, tdy, tfids, seq_meta, feat_cols = (
+            prepare_sequences_with_advanced_features(
+                train_input,
+                output_df=train_output,
+                feature_groups=feature_groups,
+            )
+        )
+        input_dim = seqs[0].shape[1]
+        sequences = list(seqs)
+        targets_dx = list(tdx)
+        targets_dy = list(tdy)
+        player_masks = None
+
+    # write meta
+    write_meta(feat_cols, base_dir=Config.SAVE_DIR)
+
+    # 3) multi-seed × KFold, save per-fold artifacts
+    print("\n[3/4] Training model...")
+    groups = np.array([f"{d['game_id']}_{d['play_id']}" for d in seq_meta])
+    unique_grps, groups = np.unique(groups, return_inverse=True)
+    print(f"Created {len(unique_grps)} unique groups (game_play_id) for GroupKFold.")
+
+    seeds = Config.SEEDS
+    all_rmse = []
+    cv_log = []
+
+    for seed in seeds:
+        print(f"\n{'='*70}\n   Seed {seed}\n{'='*70}")
+        set_seed(seed)
+        gkf = GroupKFold(n_splits=Config.N_FOLDS)
+        _all_rmse, _cv_log = train_all_folds_stt(
+            gkf, sequences, groups, targets_dx, targets_dy, seed, input_dim, player_masks=player_masks
+        )
+
+        all_rmse.extend(_all_rmse)
+        cv_log.extend(_cv_log)
+
+    print()
+    print(f"[CV SUMMARY] all folds RMSEs: {[f'{r:.4f}' for r in all_rmse]}")
+    print(f"[CV SUMMARY] overall mean RMSE = {float(np.mean(all_rmse)):.4f} yards")
+
+    write_cv_log(cv_log, all_rmse)
+    return
+
+def submit():
+    Config.TRAIN = False
+    candidates = []
+    if Config.LOAD_DIR:
+        candidates.append(Path(Config.LOAD_DIR))
+    candidates.append(Path("/kaggle/input/nfl26-bdb/tensorflow2/default/1"))
+    candidates.append(Config.MODEL_DIR)
+    picked = None
+    for d in candidates:
+        if d and (d / "meta.json").exists():
+            picked = d
+            break
+    if picked is None:
+        raise AssertionError(f"meta.json not found in any of: {[str(d) for d in candidates]}")
+    models, scalers, meta = load_saved_ensemble_stt(picked, STTransformer)
+    feature_cols = list(meta.get("feature_cols", []))
+    fg = meta.get("feature_groups", Config.FEATURE_GROUPS)
+
+    tp = Config.DATA_DIR / "test.csv"
+    ti = Config.DATA_DIR / "test_input.csv"
+    if not (tp.exists() and ti.exists()):
+        tp = Path("./data/test.csv")
+        ti = Path("./data/test_input.csv")
+
+    test_template_pd = pd.read_csv(tp)
+    test_input_pd = pd.read_csv(ti)
+
+    try:
+        sequences, seq_meta, feat_cols, player_masks = prepare_sequences_play_level(
+            test_input_pd,
+            output_df=test_template_pd,
+            feature_groups=fg,
+        )
+    except Exception:
+        sequences, seq_meta, feat_cols = prepare_sequences_with_advanced_features(
+            test_input_pd,
+            output_df=test_template_pd,
+            feature_groups=fg,
+        )
+        player_masks = None
+
+    expected = list(feature_cols)
+    if feat_cols != expected:
+        idx_map = {c: i for i, c in enumerate(feat_cols)}
+        aligned = []
+        for s in sequences:
+            if s.ndim == 2:
+                T = s.shape[0]
+                D = len(expected)
+                a = np.zeros((T, D), dtype=np.float32)
+                for j, c in enumerate(expected):
+                    i = idx_map.get(c)
+                    if i is not None:
+                        a[:, j] = s[:, i]
+                aligned.append(a)
+            elif s.ndim == 3:
+                P, T, _ = s.shape
+                D = len(expected)
+                a = np.zeros((P, T, D), dtype=np.float32)
+                for j, c in enumerate(expected):
+                    i = idx_map.get(c)
+                    if i is not None:
+                        a[..., j] = s[..., i]
+                aligned.append(a)
+            else:
+                aligned.append(s)
+        sequences = aligned
+        feat_cols = expected
+
+    x_idx = feat_cols.index("x")
+    y_idx = feat_cols.index("y")
+    if sequences and np.array(sequences[0]).ndim == 2:
+        x_last = np.array([s[-1, x_idx] for s in sequences])
+        y_last = np.array([s[-1, y_idx] for s in sequences])
+    else:
+        x_last = np.array([s[0, -1, x_idx] for s in sequences])
+        y_last = np.array([s[0, -1, y_idx] for s in sequences])
+
+    all_dx, all_dy = [], []
+    for model, scaler in zip(models, scalers):
+        dx, dy = predict_sst(model, scaler, sequences, Config.DEVICE, pm_test=player_masks)
+        all_dx.append(dx)
+        all_dy.append(dy)
+    ens_dx = np.mean(all_dx, axis=0)
+    ens_dy = np.mean(all_dy, axis=0)
+
+    rows = []
+    H = Config.MAX_FUTURE_HORIZON
+    for i, meta_i in enumerate(seq_meta):
+        pid = meta_i.get("nfl_id", meta_i.get("target_nfl_id"))
+        fids = (
+            test_template_pd[
+                (test_template_pd["game_id"] == meta_i["game_id"]) &
+                (test_template_pd["play_id"] == meta_i["play_id"]) &
+                (test_template_pd["nfl_id"] == pid)
+            ]["frame_id"].sort_values().tolist()
+        )
+        for t, _ in enumerate(fids):
+            tt = min(t, H - 1)
+            px = np.clip(x_last[i] + ens_dx[i, tt], 0, Config.FIELD_X_MAX)
+            py = np.clip(y_last[i] + ens_dy[i, tt], 0, Config.FIELD_Y_MAX)
+            rows.append({"x": px, "y": py})
 
     submission = pd.DataFrame(rows)
-    submission.to_csv("submission.csv", index=False)
-    print("\n" + "="*80)
-    print("FUSED TRANSFORMER PIPELINE COMPLETE!")
-    print("="*80)
-    print(f"✓ Submission saved: submission.csv | Rows: {len(submission)}")
-    print(f"✓ Total ensemble models: {len(all_models_x)}")
-    print(f"✓ Features used: {len(feat_cols)} | cuDF: {USE_CUDF}")
-    print(f"✓ Expected RMSE improvement from fusion architecture")
+    if getattr(Config, "WRITE_SUBMISSION_PARQUET", True):
+        try:
+            out_pq = Config.OUTPUT_DIR / "submission.parquet"
+            submission.to_parquet(out_pq, index=False)
+            try:
+                submission.to_parquet(Path("submission.parquet"), index=False)
+            except Exception:
+                pass
+        except Exception:
+            try:
+                out_csv = Config.OUTPUT_DIR / "submission.csv"
+                submission.to_csv(out_csv, index=False)
+                try:
+                    submission.to_csv(Path("submission.csv"), index=False)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    return submission
 
 if __name__ == "__main__":
-    main()
+    if Config.TRAIN:
+        train()
+    if Config.SUBMIT:
+        submit()
+
+import kaggle_evaluation.nfl_inference_server
+import polars as pl
+
+class NFLPredictor:
+    def __init__(self):
+        self.config = Config()
+        set_seed(self.config.SEEDS[0])
+
+        load_dir = Path(self.config.LOAD_DIR) if self.config.LOAD_DIR else self.config.MODEL_DIR
+        kaggle_dir = Path("/kaggle/input/nfl26-bdb/pytorch/default/1")
+        if kaggle_dir.exists():
+            load_dir = kaggle_dir
+        meta_path = load_dir / "meta.json"
+        seeds = list(self.config.SEEDS)
+        n_folds = int(self.config.N_FOLDS)
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r") as f:
+                    m = json.load(f)
+                seeds = list(m.get("seeds", seeds))
+                n_folds = int(m.get("n_folds", n_folds))
+            except Exception:
+                pass
+        candidates = []
+        for seed in seeds:
+            sdir = load_dir / f"seed_{seed}"
+            for fold in range(1, n_folds + 1):
+                candidates.append((sdir / f"model_fold{fold}.pt", sdir / f"scaler_fold{fold}.pkl"))
+        have_pretrained = meta_path.exists() and any(m.exists() and s.exists() for m, s in candidates)
+
+        if self.config.LOAD_ARTIFACTS and have_pretrained and self.config.SKIP_TRAIN_IF_PRETRAINED and not self.config.FORCE_TRAIN:
+            self.models, self.scalers, self.meta = load_saved_ensemble_stt(load_dir, STTransformer)
+            self.feature_cols = list(self.meta.get("feature_cols", []))
+            for m in self.models:
+                m.eval()
+            try:
+                if getattr(self.config, "AUTO_GENERATE_SUBMISSION_LOCAL", True):
+                    tp = Path("./data/test.csv")
+                    ti = Path("./data/test_input.csv")
+                    if tp.exists() and ti.exists():
+                        td = pl.read_csv(str(tp))
+                        ti_d = pl.read_csv(str(ti))
+                        _ = self.predict(td, ti_d)
+            except Exception:
+                pass
+            return
+
+        if self.config.FORCE_TRAIN or not have_pretrained:
+            Config.TRAIN = True
+            train()
+            self.models, self.scalers, self.meta = load_saved_ensemble_stt(self.config.MODEL_DIR, STTransformer)
+            self.feature_cols = list(self.meta.get("feature_cols", []))
+            for m in self.models:
+                m.eval()
+            try:
+                if getattr(self.config, "AUTO_GENERATE_SUBMISSION_LOCAL", True):
+                    tp = Path("./data/test.csv")
+                    ti = Path("./data/test_input.csv")
+                    if tp.exists() and ti.exists():
+                        td = pl.read_csv(str(tp))
+                        ti_d = pl.read_csv(str(ti))
+                        _ = self.predict(td, ti_d)
+            except Exception:
+                pass
+
+    def predict(self, test: pl.DataFrame, test_input: pl.DataFrame):
+        test_input_pd = test_input.to_pandas()
+        test_template_pd = test.to_pandas()
+
+        Config.TRAIN = False
+        fg = self.meta.get("feature_groups", self.config.FEATURE_GROUPS)
+        try:
+            sequences, seq_meta, feat_cols, player_masks = prepare_sequences_play_level(
+                test_input_pd,
+                output_df=test_template_pd,
+                feature_groups=fg,
+            )
+        except Exception:
+            sequences, seq_meta, feat_cols = prepare_sequences_with_advanced_features(
+                test_input_pd,
+                output_df=test_template_pd,
+                feature_groups=fg,
+            )
+            player_masks = None
+
+        expected = list(self.feature_cols)
+        if feat_cols != expected:
+            idx_map = {c: i for i, c in enumerate(feat_cols)}
+            aligned = []
+            for s in sequences:
+                if s.ndim == 2:
+                    T = s.shape[0]
+                    D = len(expected)
+                    a = np.zeros((T, D), dtype=np.float32)
+                    for j, c in enumerate(expected):
+                        i = idx_map.get(c)
+                        if i is not None:
+                            a[:, j] = s[:, i]
+                    aligned.append(a)
+                elif s.ndim == 3:
+                    P, T, _ = s.shape
+                    D = len(expected)
+                    a = np.zeros((P, T, D), dtype=np.float32)
+                    for j, c in enumerate(expected):
+                        i = idx_map.get(c)
+                        if i is not None:
+                            a[..., j] = s[..., i]
+                    aligned.append(a)
+                else:
+                    aligned.append(s)
+            sequences = aligned
+            feat_cols = expected
+
+        x_idx = feat_cols.index("x")
+        y_idx = feat_cols.index("y")
+        if sequences and np.array(sequences[0]).ndim == 2:
+            x_last = np.array([s[-1, x_idx] for s in sequences])
+            y_last = np.array([s[-1, y_idx] for s in sequences])
+        else:
+            x_last = np.array([s[0, -1, x_idx] for s in sequences])
+            y_last = np.array([s[0, -1, y_idx] for s in sequences])
+
+        all_dx, all_dy = [], []
+        for model, scaler in zip(self.models, self.scalers):
+            dx, dy = predict_sst(model, scaler, sequences, self.config.DEVICE, pm_test=player_masks)
+            all_dx.append(dx)
+            all_dy.append(dy)
+        ens_dx = np.mean(all_dx, axis=0)
+        ens_dy = np.mean(all_dy, axis=0)
+
+        rows = []
+        H = self.config.MAX_FUTURE_HORIZON
+        for i, meta in enumerate(seq_meta):
+            pid = meta.get("nfl_id", meta.get("target_nfl_id"))
+            fids = (
+                test_template_pd[
+                    (test_template_pd["game_id"] == meta["game_id"]) &
+                    (test_template_pd["play_id"] == meta["play_id"]) &
+                    (test_template_pd["nfl_id"] == pid)
+                ]["frame_id"].sort_values().tolist()
+            )
+            for t, _ in enumerate(fids):
+                tt = min(t, H - 1)
+                px = np.clip(x_last[i] + ens_dx[i, tt], 0, self.config.FIELD_X_MAX)
+                py = np.clip(y_last[i] + ens_dy[i, tt], 0, self.config.FIELD_Y_MAX)
+                rows.append({"x": px, "y": py})
+
+        submission = pd.DataFrame(rows)
+        if getattr(self.config, "WRITE_SUBMISSION_PARQUET", True):
+            try:
+                out_pq = self.config.OUTPUT_DIR / "submission.parquet"
+                submission.to_parquet(out_pq, index=False)
+                try:
+                    submission.to_parquet(Path("submission.parquet"), index=False)
+                except Exception:
+                    pass
+            except Exception:
+                try:
+                    out_csv = self.config.OUTPUT_DIR / "submission.csv"
+                    submission.to_csv(out_csv, index=False)
+                    try:
+                        submission.to_csv(Path("submission.csv"), index=False)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        return submission
+
+predictor = NFLPredictor()
+
+def predict(test: pl.DataFrame, test_input: pl.DataFrame):
+    return predictor.predict(test, test_input)
+
+inference_server = kaggle_evaluation.nfl_inference_server.NFLInferenceServer(predict)
+
+if os.getenv("KAGGLE_IS_COMPETITION_RERUN"):
+    inference_server.serve()
+else:
+    inference_server.run_local_gateway(("/kaggle/input/nfl-big-data-bowl-2026-prediction/",))

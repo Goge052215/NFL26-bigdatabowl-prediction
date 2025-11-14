@@ -1,0 +1,562 @@
+[1/4] Loading training data
+Filtered input rows:  338
+Filtered output rows:  752
+
+[2/4] Feature Engineering
+
+================================================================================
+PREPARING SEQUENCES WITH ADVANCED FEATURES (UNIFIED FRAME)
+================================================================================
+Window size: 10
+[17:20:24] [+] Added 'target_alignment' (4 cols) in 0.05s
+    Columns: ['velocity_alignment', 'velocity_perpendicular', 'accel_alignment', 'accel_perpendicular']
+[17:20:30] [+] Added 'lag' (24 cols) in 5.58s
+    Columns: ['velocity_x_lag1', 'velocity_x_diff_lag1', 'velocity_y_lag1', 'velocity_y_diff_lag1', 's_lag1', 's_diff_lag1', 'velocity_x_lag2', 'velocity_x_diff_lag2', 'velocity_y_lag2', 'velocity_y_diff_lag2', 's_lag2', 's_diff_lag2', 'velocity_x_lag3', 'velocity_x_diff_lag3', 'velocity_y_lag3', 'velocity_y_diff_lag3', 's_lag3', 's_diff_lag3', 'velocity_x_lag5', 'velocity_y_lag5', 's_lag5', 'velocity_x_lag10', 'velocity_y_lag10', 's_lag10']
+[17:20:31] [+] Added 'motion_change' (6 cols) in 0.95s
+    Columns: ['velocity_x_change', 'velocity_y_change', 's_change', 'a_change', 'dir_change', 'o_change']
+[17:20:31] [+] Added 'field_position' (7 cols) in 0.15s
+    Columns: ['dist_from_sideline', 'dist_from_endzone', 'field_zone_x', 'field_zone_y', 'in_red_zone', 'near_sideline', 'dist_from_center']
+[17:20:31] [+] Added 'distance_rate' (3 cols) in 0.37s
+    Columns: ['d2ball_dt', 'd2ball_ddt', 'time_to_intercept']
+[17:20:31] [+] Added 'geometric' (2 cols) in 0.06s
+    Columns: ['geo_endpoint_x', 'geo_endpoint_y']
+[17:21:00] [+] Added 'neighbor_temporal' (24 cols) in 28.51s
+    Columns: ['dx_ally_w_sum_t', 'dy_ally_w_sum_t', 'dvx_ally_w_sum_t', 'dvy_ally_w_sum_t', 'dx_opp_w_sum_t', 'dy_opp_w_sum_t', 'dvx_opp_w_sum_t', 'dvy_opp_w_sum_t', 'is_ally_sum_t', 'is_opp_sum_t', 'dist_ally_min_t', 'dist_ally_mean_t', 'dist_opp_min_t', 'dist_opp_mean_t', 'gnn_n1_dist_t', 'gnn_n2_dist_t', 'gnn_n3_dist_t', 'pressure_t', 'under_pressure_t', 'have_assistance_t', 'ally_density_t', 'oppn_density_t', 'density_ratio_t', 'pressure_speed_t']
+[17:21:00] [+] Added 'time' (5 cols) in 0.21s
+    Columns: ['time_to_end', 'time_urgency', 'time_dist_urgency', 'time_normalized_pass', 'time_normalized_all']
+[17:21:09] [+] Added 'passer' (4 cols) in 8.95s
+    Columns: ['passer_distance', 'v_to_passer_alignment', 'v_to_passer_perp', 'bearing_to_passer']
+100%|█████████████████████████████████| 173137/173137 [00:01<00:00, 110166.08it/s]
+[17:21:22] [+] Added 'curvature' (4 cols) in 12.95s
+    Columns: ['bearing_to_land_signed', 'land_lateral_offset', 'curvature_signed', 'curvature_abs']
+[17:21:32] [+] Added 'route' (8 cols) in 10.41s
+    Columns: ['speed_mean', 'speed_change', 'traj_straightness', 'traj_depth', 'traj_width', 'traj_direction_angle', 'traj_max_turn', 'traj_mean_turn']
+[17:21:40] [+] Added 'receiver' (4 cols) in 8.14s
+    Columns: ['receiver_distance', 'v_to_receiver_alignment', 'v_to_receiver_perp', 'bearing_to_receiver']
+
+Total features created: 127
+Creating sequences (groups): 100%|█████████| 46037/46037 [02:43<00:00, 281.05it/s]
+Created 46037 sequences with 127 features each
+Time to build sequences: 168.00 seconds
+[META] wrote meta.json to output/default
+
+[3/4] Training model...
+Created 14107 unique groups (game_play_id) for GroupKFold.
+
+======================================================================
+   Seed 42
+======================================================================
+
+------------------------------------------------------------
+Fold 1/5 (seed 42)
+------------------------------------------------------------
+[Device] Training on mps
+  Epoch   1: train=0.3376, val=0.1863, rmse=0.8792, Time_elapsed= 0min  3s
+  Epoch   2: train=0.2087, val=0.1646, rmse=0.7971, Time_elapsed= 0min  6s
+  Epoch   3: train=0.1877, val=0.1590, rmse=0.7800, Time_elapsed= 0min  9s
+  Epoch   4: train=0.1698, val=0.1315, rmse=0.6837, Time_elapsed= 0min 12s
+  Epoch   5: train=0.1652, val=0.1477, rmse=0.7306, Time_elapsed= 0min 15s
+  Epoch   6: train=0.1571, val=0.1386, rmse=0.6820, Time_elapsed= 0min 18s
+  Epoch   7: train=0.1535, val=0.1721, rmse=0.7773, Time_elapsed= 0min 20s
+  Epoch   8: train=0.1517, val=0.1241, rmse=0.6604, Time_elapsed= 0min 23s
+  Epoch   9: train=0.1455, val=0.1276, rmse=0.6662, Time_elapsed= 0min 26s
+  Epoch  10: train=0.1432, val=0.1142, rmse=0.6200, Time_elapsed= 0min 29s
+  Epoch  11: train=0.1407, val=0.1148, rmse=0.6290, Time_elapsed= 0min 32s
+  Epoch  12: train=0.1357, val=0.1155, rmse=0.6321, Time_elapsed= 0min 35s
+  Epoch  13: train=0.1352, val=0.1143, rmse=0.6222, Time_elapsed= 0min 37s
+  Epoch  14: train=0.1325, val=0.1200, rmse=0.6296, Time_elapsed= 0min 40s
+  Epoch  15: train=0.1322, val=0.1213, rmse=0.6314, Time_elapsed= 0min 43s
+  Epoch  16: train=0.1313, val=0.1176, rmse=0.6192, Time_elapsed= 0min 46s
+  Epoch  17: train=0.1194, val=0.1032, rmse=0.5962, Time_elapsed= 0min 49s
+  Epoch  18: train=0.1179, val=0.1031, rmse=0.5921, Time_elapsed= 0min 52s
+  Epoch  19: train=0.1184, val=0.1082, rmse=0.6061, Time_elapsed= 0min 55s
+  Epoch  20: train=0.1170, val=0.1064, rmse=0.5985, Time_elapsed= 0min 58s
+  Epoch  21: train=0.1155, val=0.1054, rmse=0.6023, Time_elapsed= 1min  0s
+  Epoch  22: train=0.1143, val=0.1103, rmse=0.6035, Time_elapsed= 1min  3s
+  Epoch  23: train=0.1144, val=0.1057, rmse=0.6082, Time_elapsed= 1min  6s
+  Epoch  24: train=0.1128, val=0.1059, rmse=0.6070, Time_elapsed= 1min  9s
+  Epoch  25: train=0.1078, val=0.1007, rmse=0.5885, Time_elapsed= 1min 12s
+  Epoch  26: train=0.1073, val=0.0987, rmse=0.5844, Time_elapsed= 1min 15s
+  Epoch  27: train=0.1053, val=0.0990, rmse=0.5834, Time_elapsed= 1min 18s
+  Epoch  28: train=0.1057, val=0.0993, rmse=0.5866, Time_elapsed= 1min 20s
+  Epoch  29: train=0.1052, val=0.0998, rmse=0.5866, Time_elapsed= 1min 23s
+  Epoch  30: train=0.1050, val=0.1003, rmse=0.5911, Time_elapsed= 1min 26s
+  Epoch  31: train=0.1045, val=0.1005, rmse=0.5937, Time_elapsed= 1min 29s
+  Epoch  32: train=0.1034, val=0.0987, rmse=0.5838, Time_elapsed= 1min 32s
+  Epoch  33: train=0.1018, val=0.0973, rmse=0.5806, Time_elapsed= 1min 35s
+  Epoch  34: train=0.0998, val=0.0980, rmse=0.5808, Time_elapsed= 1min 38s
+  Epoch  35: train=0.1001, val=0.0983, rmse=0.5788, Time_elapsed= 1min 41s
+  Epoch  36: train=0.0996, val=0.0984, rmse=0.5804, Time_elapsed= 1min 43s
+  Epoch  37: train=0.0995, val=0.0984, rmse=0.5820, Time_elapsed= 1min 46s
+  Epoch  38: train=0.0988, val=0.0980, rmse=0.5799, Time_elapsed= 1min 49s
+  Epoch  39: train=0.0990, val=0.0984, rmse=0.5812, Time_elapsed= 1min 52s
+  Epoch  40: train=0.0977, val=0.0961, rmse=0.5738, Time_elapsed= 1min 55s
+  Epoch  41: train=0.0971, val=0.0950, rmse=0.5713, Time_elapsed= 1min 58s
+  Epoch  42: train=0.0975, val=0.0953, rmse=0.5720, Time_elapsed= 2min  1s
+  Epoch  43: train=0.0967, val=0.0950, rmse=0.5697, Time_elapsed= 2min  3s
+  Epoch  44: train=0.0966, val=0.0958, rmse=0.5738, Time_elapsed= 2min  6s
+  Epoch  45: train=0.0960, val=0.0955, rmse=0.5724, Time_elapsed= 2min  9s
+  Epoch  46: train=0.0962, val=0.0965, rmse=0.5771, Time_elapsed= 2min 12s
+  Epoch  47: train=0.0964, val=0.0952, rmse=0.5710, Time_elapsed= 2min 15s
+  Epoch  48: train=0.0962, val=0.0954, rmse=0.5744, Time_elapsed= 2min 18s
+  Epoch  49: train=0.0954, val=0.0954, rmse=0.5731, Time_elapsed= 2min 21s
+  Epoch  50: train=0.0954, val=0.0947, rmse=0.5727, Time_elapsed= 2min 23s
+  Epoch  51: train=0.0944, val=0.0950, rmse=0.5734, Time_elapsed= 2min 26s
+  Epoch  52: train=0.0948, val=0.0948, rmse=0.5721, Time_elapsed= 2min 29s
+  Epoch  53: train=0.0943, val=0.0950, rmse=0.5738, Time_elapsed= 2min 32s
+  Epoch  54: train=0.0945, val=0.0949, rmse=0.5726, Time_elapsed= 2min 35s
+  Epoch  55: train=0.0947, val=0.0952, rmse=0.5741, Time_elapsed= 2min 38s
+  Epoch  56: train=0.0945, val=0.0949, rmse=0.5728, Time_elapsed= 2min 40s
+  Epoch  57: train=0.0939, val=0.0950, rmse=0.5746, Time_elapsed= 2min 43s
+  Epoch  58: train=0.0939, val=0.0946, rmse=0.5723, Time_elapsed= 2min 46s
+  Epoch  59: train=0.0934, val=0.0948, rmse=0.5730, Time_elapsed= 2min 49s
+  Epoch  60: train=0.0932, val=0.0946, rmse=0.5727, Time_elapsed= 2min 52s
+  Epoch  61: train=0.0935, val=0.0947, rmse=0.5728, Time_elapsed= 2min 55s
+  Epoch  62: train=0.0930, val=0.0951, rmse=0.5743, Time_elapsed= 2min 57s
+  Epoch  63: train=0.0932, val=0.0947, rmse=0.5732, Time_elapsed= 3min  0s
+  Epoch  64: train=0.0930, val=0.0950, rmse=0.5737, Time_elapsed= 3min  3s
+  Epoch  65: train=0.0930, val=0.0948, rmse=0.5736, Time_elapsed= 3min  6s
+  Epoch  66: train=0.0926, val=0.0948, rmse=0.5731, Time_elapsed= 3min  9s
+  Epoch  67: train=0.0929, val=0.0947, rmse=0.5736, Time_elapsed= 3min 12s
+  Epoch  68: train=0.0930, val=0.0949, rmse=0.5740, Time_elapsed= 3min 15s
+  Epoch  69: train=0.0926, val=0.0948, rmse=0.5732, Time_elapsed= 3min 18s
+  Epoch  70: train=0.0930, val=0.0948, rmse=0.5735, Time_elapsed= 3min 20s
+  Epoch  71: train=0.0926, val=0.0947, rmse=0.5735, Time_elapsed= 3min 23s
+  Epoch  72: train=0.0927, val=0.0947, rmse=0.5728, Time_elapsed= 3min 26s
+  Epoch  73: train=0.0924, val=0.0948, rmse=0.5734, Time_elapsed= 3min 29s
+  Epoch  74: train=0.0928, val=0.0946, rmse=0.5729, Time_elapsed= 3min 32s
+  Epoch  75: train=0.0926, val=0.0948, rmse=0.5739, Time_elapsed= 3min 35s
+  Epoch  76: train=0.0923, val=0.0948, rmse=0.5735, Time_elapsed= 3min 38s
+  Epoch  77: train=0.0928, val=0.0947, rmse=0.5733, Time_elapsed= 3min 40s
+  Epoch  78: train=0.0931, val=0.0947, rmse=0.5732, Time_elapsed= 3min 43s
+  Epoch  79: train=0.0925, val=0.0948, rmse=0.5734, Time_elapsed= 3min 46s
+  Epoch  80: train=0.0923, val=0.0947, rmse=0.5733, Time_elapsed= 3min 49s
+  Epoch  81: train=0.0921, val=0.0947, rmse=0.5730, Time_elapsed= 3min 52s
+  Epoch  82: train=0.0930, val=0.0947, rmse=0.5734, Time_elapsed= 3min 54s
+  Epoch  83: train=0.0923, val=0.0947, rmse=0.5735, Time_elapsed= 3min 57s
+  Epoch  84: train=0.0923, val=0.0947, rmse=0.5734, Time_elapsed= 4min  0s
+  Epoch  85: train=0.0929, val=0.0949, rmse=0.5739, Time_elapsed= 4min  3s
+  Epoch  86: train=0.0921, val=0.0948, rmse=0.5736, Time_elapsed= 4min  6s
+  Epoch  87: train=0.0924, val=0.0948, rmse=0.5734, Time_elapsed= 4min  9s
+  Epoch  88: train=0.0926, val=0.0947, rmse=0.5734, Time_elapsed= 4min 11s
+  Epoch  89: train=0.0928, val=0.0947, rmse=0.5735, Time_elapsed= 4min 14s
+  Epoch  90: train=0.0925, val=0.0948, rmse=0.5736, Time_elapsed= 4min 17s
+  Epoch  91: train=0.0915, val=0.0948, rmse=0.5737, Time_elapsed= 4min 20s
+  Epoch  92: train=0.0924, val=0.0947, rmse=0.5735, Time_elapsed= 4min 23s
+  Epoch  93: train=0.0924, val=0.0947, rmse=0.5734, Time_elapsed= 4min 26s
+  Epoch  94: train=0.0925, val=0.0948, rmse=0.5736, Time_elapsed= 4min 28s
+  Epoch  95: train=0.0921, val=0.0948, rmse=0.5736, Time_elapsed= 4min 31s
+  Epoch  96: train=0.0925, val=0.0947, rmse=0.5735, Time_elapsed= 4min 34s
+  Epoch  97: train=0.0924, val=0.0947, rmse=0.5735, Time_elapsed= 4min 37s
+  Epoch  98: train=0.0922, val=0.0948, rmse=0.5736, Time_elapsed= 4min 40s
+  Epoch  99: train=0.0927, val=0.0948, rmse=0.5736, Time_elapsed= 4min 43s
+  Epoch 100: train=0.0926, val=0.0948, rmse=0.5736, Time_elapsed= 4min 46s
+  Epoch 101: train=0.0930, val=0.0947, rmse=0.5735, Time_elapsed= 4min 48s
+  Epoch 102: train=0.0925, val=0.0947, rmse=0.5735, Time_elapsed= 4min 51s
+  Epoch 103: train=0.0919, val=0.0947, rmse=0.5735, Time_elapsed= 4min 54s
+  Epoch 104: train=0.0926, val=0.0947, rmse=0.5735, Time_elapsed= 4min 57s
+  Early stop at epoch 104
+[VAL] seed 42 fold 1 at Huber loss=0.09462 | RMSE=0.5729
+
+------------------------------------------------------------
+Fold 2/5 (seed 42)
+------------------------------------------------------------
+[Device] Training on mps
+  Epoch   1: train=0.3207, val=0.1756, rmse=0.8184, Time_elapsed= 0min  2s
+  Epoch   2: train=0.2064, val=0.1449, rmse=0.7524, Time_elapsed= 0min  5s
+  Epoch   3: train=0.1835, val=0.1421, rmse=0.7415, Time_elapsed= 0min  8s
+  Epoch   4: train=0.1720, val=0.1294, rmse=0.7063, Time_elapsed= 0min 12s
+  Epoch   5: train=0.1638, val=0.1432, rmse=0.7152, Time_elapsed= 0min 14s
+  Epoch   6: train=0.1559, val=0.1320, rmse=0.6856, Time_elapsed= 0min 17s
+  Epoch   7: train=0.1515, val=0.1395, rmse=0.7201, Time_elapsed= 0min 20s
+  Epoch   8: train=0.1445, val=0.1140, rmse=0.6437, Time_elapsed= 0min 23s
+  Epoch   9: train=0.1454, val=0.1289, rmse=0.6793, Time_elapsed= 0min 26s
+  Epoch  10: train=0.1438, val=0.1363, rmse=0.6732, Time_elapsed= 0min 29s
+  Epoch  11: train=0.1409, val=0.1255, rmse=0.6490, Time_elapsed= 0min 32s
+  Epoch  12: train=0.1365, val=0.1192, rmse=0.6412, Time_elapsed= 0min 35s
+  Epoch  13: train=0.1342, val=0.1164, rmse=0.6376, Time_elapsed= 0min 38s
+  Epoch  14: train=0.1350, val=0.1136, rmse=0.6318, Time_elapsed= 0min 41s
+  Epoch  15: train=0.1313, val=0.1174, rmse=0.6399, Time_elapsed= 0min 44s
+  Epoch  16: train=0.1298, val=0.1097, rmse=0.6299, Time_elapsed= 0min 47s
+  Epoch  17: train=0.1281, val=0.1123, rmse=0.6307, Time_elapsed= 0min 50s
+  Epoch  18: train=0.1259, val=0.1042, rmse=0.6090, Time_elapsed= 0min 53s
+  Epoch  19: train=0.1277, val=0.1089, rmse=0.6223, Time_elapsed= 0min 55s
+  Epoch  20: train=0.1255, val=0.1102, rmse=0.6393, Time_elapsed= 0min 58s
+  Epoch  21: train=0.1211, val=0.1100, rmse=0.6185, Time_elapsed= 1min  1s
+  Epoch  22: train=0.1211, val=0.1044, rmse=0.6096, Time_elapsed= 1min  4s
+  Epoch  23: train=0.1189, val=0.1081, rmse=0.6123, Time_elapsed= 1min  7s
+  Epoch  24: train=0.1181, val=0.1080, rmse=0.6303, Time_elapsed= 1min 10s
+  Epoch  25: train=0.1108, val=0.0990, rmse=0.5947, Time_elapsed= 1min 13s
+  Epoch  26: train=0.1089, val=0.0990, rmse=0.5898, Time_elapsed= 1min 16s
+  Epoch  27: train=0.1085, val=0.0996, rmse=0.6001, Time_elapsed= 1min 19s
+  Epoch  28: train=0.1070, val=0.1021, rmse=0.6148, Time_elapsed= 1min 21s
+  Epoch  29: train=0.1075, val=0.1017, rmse=0.6050, Time_elapsed= 1min 24s
+  Epoch  30: train=0.1067, val=0.1015, rmse=0.6116, Time_elapsed= 1min 27s
+  Epoch  31: train=0.1065, val=0.1032, rmse=0.6109, Time_elapsed= 1min 30s
+  Epoch  32: train=0.1016, val=0.0946, rmse=0.5921, Time_elapsed= 1min 33s
+  Epoch  33: train=0.0996, val=0.0938, rmse=0.5891, Time_elapsed= 1min 36s
+  Epoch  34: train=0.0984, val=0.0946, rmse=0.5875, Time_elapsed= 1min 39s
+  Epoch  35: train=0.0985, val=0.0949, rmse=0.5933, Time_elapsed= 1min 42s
+  Epoch  36: train=0.0970, val=0.0964, rmse=0.5967, Time_elapsed= 1min 44s
+  Epoch  37: train=0.0985, val=0.0946, rmse=0.5924, Time_elapsed= 1min 47s
+  Epoch  38: train=0.0974, val=0.0956, rmse=0.5898, Time_elapsed= 1min 50s
+  Epoch  39: train=0.0966, val=0.0974, rmse=0.5993, Time_elapsed= 1min 53s
+  Epoch  40: train=0.0948, val=0.0929, rmse=0.5782, Time_elapsed= 1min 56s
+  Epoch  41: train=0.0935, val=0.0935, rmse=0.5797, Time_elapsed= 1min 59s
+  Epoch  42: train=0.0934, val=0.0941, rmse=0.5788, Time_elapsed= 2min  2s
+  Epoch  43: train=0.0940, val=0.0930, rmse=0.5856, Time_elapsed= 2min  5s
+  Epoch  44: train=0.0928, val=0.0939, rmse=0.5843, Time_elapsed= 2min  7s
+  Epoch  45: train=0.0925, val=0.0955, rmse=0.5879, Time_elapsed= 2min 10s
+  Epoch  46: train=0.0926, val=0.0950, rmse=0.5950, Time_elapsed= 2min 13s
+  Epoch  47: train=0.0908, val=0.0924, rmse=0.5823, Time_elapsed= 2min 16s
+  Epoch  48: train=0.0911, val=0.0923, rmse=0.5797, Time_elapsed= 2min 19s
+  Epoch  49: train=0.0900, val=0.0926, rmse=0.5844, Time_elapsed= 2min 22s
+  Epoch  50: train=0.0895, val=0.0917, rmse=0.5784, Time_elapsed= 2min 25s
+  Epoch  51: train=0.0899, val=0.0932, rmse=0.5876, Time_elapsed= 2min 27s
+  Epoch  52: train=0.0901, val=0.0923, rmse=0.5830, Time_elapsed= 2min 30s
+  Epoch  53: train=0.0904, val=0.0925, rmse=0.5829, Time_elapsed= 2min 33s
+  Epoch  54: train=0.0901, val=0.0925, rmse=0.5815, Time_elapsed= 2min 36s
+  Epoch  55: train=0.0896, val=0.0922, rmse=0.5790, Time_elapsed= 2min 39s
+  Epoch  56: train=0.0895, val=0.0927, rmse=0.5835, Time_elapsed= 2min 42s
+  Epoch  57: train=0.0887, val=0.0923, rmse=0.5826, Time_elapsed= 2min 45s
+  Epoch  58: train=0.0889, val=0.0922, rmse=0.5829, Time_elapsed= 2min 48s
+  Epoch  59: train=0.0879, val=0.0921, rmse=0.5820, Time_elapsed= 2min 50s
+  Epoch  60: train=0.0879, val=0.0920, rmse=0.5822, Time_elapsed= 2min 53s
+  Epoch  61: train=0.0877, val=0.0920, rmse=0.5825, Time_elapsed= 2min 56s
+  Epoch  62: train=0.0875, val=0.0922, rmse=0.5836, Time_elapsed= 2min 59s
+  Epoch  63: train=0.0874, val=0.0922, rmse=0.5851, Time_elapsed= 3min  2s
+  Epoch  64: train=0.0873, val=0.0920, rmse=0.5832, Time_elapsed= 3min  5s
+  Epoch  65: train=0.0875, val=0.0921, rmse=0.5835, Time_elapsed= 3min  8s
+  Epoch  66: train=0.0872, val=0.0920, rmse=0.5826, Time_elapsed= 3min 11s
+  Epoch  67: train=0.0869, val=0.0923, rmse=0.5828, Time_elapsed= 3min 14s
+  Epoch  68: train=0.0880, val=0.0921, rmse=0.5832, Time_elapsed= 3min 17s
+  Epoch  69: train=0.0874, val=0.0922, rmse=0.5841, Time_elapsed= 3min 20s
+  Epoch  70: train=0.0874, val=0.0921, rmse=0.5839, Time_elapsed= 3min 23s
+  Epoch  71: train=0.0867, val=0.0922, rmse=0.5834, Time_elapsed= 3min 26s
+  Epoch  72: train=0.0871, val=0.0921, rmse=0.5834, Time_elapsed= 3min 29s
+  Epoch  73: train=0.0870, val=0.0922, rmse=0.5831, Time_elapsed= 3min 32s
+  Epoch  74: train=0.0864, val=0.0921, rmse=0.5830, Time_elapsed= 3min 35s
+  Epoch  75: train=0.0862, val=0.0923, rmse=0.5844, Time_elapsed= 3min 38s
+  Epoch  76: train=0.0870, val=0.0923, rmse=0.5849, Time_elapsed= 3min 41s
+  Epoch  77: train=0.0871, val=0.0923, rmse=0.5848, Time_elapsed= 3min 44s
+  Epoch  78: train=0.0866, val=0.0922, rmse=0.5844, Time_elapsed= 3min 46s
+  Epoch  79: train=0.0867, val=0.0923, rmse=0.5846, Time_elapsed= 3min 49s
+  Epoch  80: train=0.0869, val=0.0922, rmse=0.5843, Time_elapsed= 3min 52s
+  Early stop at epoch 80
+[VAL] seed 42 fold 2 at Huber loss=0.09174 | RMSE=0.5784
+
+------------------------------------------------------------
+Fold 3/5 (seed 42)
+------------------------------------------------------------
+[Device] Training on mps
+  Epoch   1: train=0.3399, val=0.1841, rmse=0.8123, Time_elapsed= 0min  3s
+  Epoch   2: train=0.2084, val=0.1603, rmse=0.7538, Time_elapsed= 0min  6s
+  Epoch   3: train=0.1885, val=0.1563, rmse=0.7330, Time_elapsed= 0min  9s
+  Epoch   4: train=0.1709, val=0.1514, rmse=0.7135, Time_elapsed= 0min 12s
+  Epoch   5: train=0.1628, val=0.1358, rmse=0.6680, Time_elapsed= 0min 15s
+  Epoch   6: train=0.1591, val=0.1397, rmse=0.6784, Time_elapsed= 0min 18s
+  Epoch   7: train=0.1530, val=0.1342, rmse=0.6748, Time_elapsed= 0min 20s
+  Epoch   8: train=0.1495, val=0.1208, rmse=0.6288, Time_elapsed= 0min 23s
+  Epoch   9: train=0.1480, val=0.1237, rmse=0.6304, Time_elapsed= 0min 26s
+  Epoch  10: train=0.1407, val=0.1235, rmse=0.6356, Time_elapsed= 0min 29s
+  Epoch  11: train=0.1402, val=0.1234, rmse=0.6449, Time_elapsed= 0min 32s
+  Epoch  12: train=0.1373, val=0.1235, rmse=0.6409, Time_elapsed= 0min 35s
+  Epoch  13: train=0.1350, val=0.1139, rmse=0.6186, Time_elapsed= 0min 37s
+  Epoch  14: train=0.1321, val=0.1148, rmse=0.6175, Time_elapsed= 0min 40s
+  Epoch  15: train=0.1320, val=0.1153, rmse=0.6244, Time_elapsed= 0min 43s
+  Epoch  16: train=0.1300, val=0.1135, rmse=0.6326, Time_elapsed= 0min 46s
+  Epoch  17: train=0.1292, val=0.1106, rmse=0.6105, Time_elapsed= 0min 49s
+  Epoch  18: train=0.1261, val=0.1059, rmse=0.5974, Time_elapsed= 0min 52s
+  Epoch  19: train=0.1259, val=0.1182, rmse=0.6342, Time_elapsed= 0min 55s
+  Epoch  20: train=0.1242, val=0.1027, rmse=0.5833, Time_elapsed= 0min 58s
+  Epoch  21: train=0.1226, val=0.1059, rmse=0.5984, Time_elapsed= 1min  0s
+  Epoch  22: train=0.1262, val=0.1147, rmse=0.6247, Time_elapsed= 1min  4s
+  Epoch  23: train=0.1223, val=0.1092, rmse=0.6160, Time_elapsed= 1min  6s
+  Epoch  24: train=0.1192, val=0.1118, rmse=0.6234, Time_elapsed= 1min 10s
+  Epoch  25: train=0.1211, val=0.1204, rmse=0.6555, Time_elapsed= 1min 13s
+  Epoch  26: train=0.1173, val=0.1106, rmse=0.6169, Time_elapsed= 1min 16s
+  Epoch  27: train=0.1094, val=0.1012, rmse=0.6029, Time_elapsed= 1min 19s
+  Epoch  28: train=0.1096, val=0.1021, rmse=0.6078, Time_elapsed= 1min 22s
+  Epoch  29: train=0.1069, val=0.0999, rmse=0.5823, Time_elapsed= 1min 25s
+  Epoch  30: train=0.1067, val=0.1027, rmse=0.5945, Time_elapsed= 1min 28s
+  Epoch  31: train=0.1056, val=0.1012, rmse=0.5917, Time_elapsed= 1min 31s
+  Epoch  32: train=0.1047, val=0.1024, rmse=0.5953, Time_elapsed= 1min 33s
+  Epoch  33: train=0.1058, val=0.1004, rmse=0.5958, Time_elapsed= 1min 36s
+  Epoch  34: train=0.1042, val=0.1039, rmse=0.6108, Time_elapsed= 1min 39s
+  Epoch  35: train=0.1015, val=0.1020, rmse=0.6065, Time_elapsed= 1min 42s
+  Epoch  36: train=0.0988, val=0.0976, rmse=0.5766, Time_elapsed= 1min 45s
+  Epoch  37: train=0.0963, val=0.0993, rmse=0.5847, Time_elapsed= 1min 48s
+  Epoch  38: train=0.0970, val=0.0975, rmse=0.5790, Time_elapsed= 1min 51s
+  Epoch  39: train=0.0954, val=0.0993, rmse=0.5859, Time_elapsed= 1min 54s
+  Epoch  40: train=0.0951, val=0.0998, rmse=0.5893, Time_elapsed= 1min 57s
+  Epoch  41: train=0.0949, val=0.0991, rmse=0.5899, Time_elapsed= 2min  0s
+  Epoch  42: train=0.0946, val=0.0993, rmse=0.5927, Time_elapsed= 2min  3s
+  Epoch  43: train=0.0933, val=0.0987, rmse=0.5857, Time_elapsed= 2min  6s
+  Epoch  44: train=0.0931, val=0.0974, rmse=0.5886, Time_elapsed= 2min  9s
+  Epoch  45: train=0.0934, val=0.0972, rmse=0.5811, Time_elapsed= 2min 12s
+  Epoch  46: train=0.0936, val=0.0982, rmse=0.5836, Time_elapsed= 2min 15s
+  Epoch  47: train=0.0922, val=0.0997, rmse=0.5951, Time_elapsed= 2min 18s
+  Epoch  48: train=0.0926, val=0.0987, rmse=0.5828, Time_elapsed= 2min 21s
+  Epoch  49: train=0.0924, val=0.0996, rmse=0.5938, Time_elapsed= 2min 24s
+  Epoch  50: train=0.0916, val=0.0990, rmse=0.5926, Time_elapsed= 2min 27s
+  Epoch  51: train=0.0911, val=0.0997, rmse=0.5873, Time_elapsed= 2min 30s
+  Epoch  52: train=0.0889, val=0.0965, rmse=0.5731, Time_elapsed= 2min 33s
+  Epoch  53: train=0.0876, val=0.0963, rmse=0.5727, Time_elapsed= 2min 37s
+  Epoch  54: train=0.0879, val=0.0965, rmse=0.5765, Time_elapsed= 2min 40s
+  Epoch  55: train=0.0876, val=0.0957, rmse=0.5688, Time_elapsed= 2min 43s
+  Epoch  56: train=0.0870, val=0.0969, rmse=0.5786, Time_elapsed= 2min 46s
+  Epoch  57: train=0.0872, val=0.0972, rmse=0.5781, Time_elapsed= 2min 49s
+  Epoch  58: train=0.0868, val=0.0972, rmse=0.5765, Time_elapsed= 2min 52s
+  Epoch  59: train=0.0863, val=0.0972, rmse=0.5834, Time_elapsed= 2min 55s
+  Epoch  60: train=0.0863, val=0.0980, rmse=0.5794, Time_elapsed= 2min 58s
+  Epoch  61: train=0.0850, val=0.0983, rmse=0.5840, Time_elapsed= 3min  1s
+  Epoch  62: train=0.0846, val=0.0950, rmse=0.5683, Time_elapsed= 3min  4s
+  Epoch  63: train=0.0842, val=0.0946, rmse=0.5691, Time_elapsed= 3min  7s
+  Epoch  64: train=0.0833, val=0.0957, rmse=0.5745, Time_elapsed= 3min 10s
+  Epoch  65: train=0.0837, val=0.0957, rmse=0.5738, Time_elapsed= 3min 13s
+  Epoch  66: train=0.0837, val=0.0951, rmse=0.5711, Time_elapsed= 3min 16s
+  Epoch  67: train=0.0838, val=0.0950, rmse=0.5692, Time_elapsed= 3min 19s
+  Epoch  68: train=0.0841, val=0.0954, rmse=0.5714, Time_elapsed= 3min 22s
+  Epoch  69: train=0.0832, val=0.0949, rmse=0.5728, Time_elapsed= 3min 25s
+  Epoch  70: train=0.0821, val=0.0949, rmse=0.5702, Time_elapsed= 3min 28s
+  Epoch  71: train=0.0817, val=0.0953, rmse=0.5738, Time_elapsed= 3min 31s
+  Epoch  72: train=0.0815, val=0.0947, rmse=0.5706, Time_elapsed= 3min 34s
+  Epoch  73: train=0.0820, val=0.0944, rmse=0.5693, Time_elapsed= 3min 37s
+  Epoch  74: train=0.0821, val=0.0945, rmse=0.5704, Time_elapsed= 3min 40s
+  Epoch  75: train=0.0819, val=0.0949, rmse=0.5723, Time_elapsed= 3min 42s
+  Epoch  76: train=0.0818, val=0.0944, rmse=0.5688, Time_elapsed= 3min 45s
+  Epoch  77: train=0.0819, val=0.0945, rmse=0.5699, Time_elapsed= 3min 48s
+  Epoch  78: train=0.0814, val=0.0947, rmse=0.5711, Time_elapsed= 3min 51s
+  Epoch  79: train=0.0822, val=0.0943, rmse=0.5679, Time_elapsed= 3min 54s
+  Epoch  80: train=0.0819, val=0.0949, rmse=0.5712, Time_elapsed= 3min 57s
+  Epoch  81: train=0.0814, val=0.0949, rmse=0.5690, Time_elapsed= 4min  0s
+  Epoch  82: train=0.0822, val=0.0949, rmse=0.5703, Time_elapsed= 4min  3s
+  Epoch  83: train=0.0814, val=0.0945, rmse=0.5708, Time_elapsed= 4min  6s
+  Epoch  84: train=0.0811, val=0.0951, rmse=0.5742, Time_elapsed= 4min  9s
+  Epoch  85: train=0.0814, val=0.0949, rmse=0.5702, Time_elapsed= 4min 12s
+  Epoch  86: train=0.0810, val=0.0945, rmse=0.5716, Time_elapsed= 4min 15s
+  Epoch  87: train=0.0810, val=0.0943, rmse=0.5703, Time_elapsed= 4min 18s
+  Epoch  88: train=0.0805, val=0.0942, rmse=0.5693, Time_elapsed= 4min 21s
+  Epoch  89: train=0.0810, val=0.0944, rmse=0.5707, Time_elapsed= 4min 24s
+  Epoch  90: train=0.0809, val=0.0945, rmse=0.5712, Time_elapsed= 4min 27s
+  Epoch  91: train=0.0810, val=0.0945, rmse=0.5707, Time_elapsed= 4min 29s
+  Epoch  92: train=0.0802, val=0.0943, rmse=0.5697, Time_elapsed= 4min 32s
+  Epoch  93: train=0.0805, val=0.0946, rmse=0.5719, Time_elapsed= 4min 35s
+  Epoch  94: train=0.0807, val=0.0945, rmse=0.5705, Time_elapsed= 4min 38s
+  Epoch  95: train=0.0805, val=0.0943, rmse=0.5709, Time_elapsed= 4min 41s
+  Epoch  96: train=0.0791, val=0.0944, rmse=0.5710, Time_elapsed= 4min 45s
+  Epoch  97: train=0.0804, val=0.0942, rmse=0.5700, Time_elapsed= 4min 48s
+  Epoch  98: train=0.0804, val=0.0942, rmse=0.5696, Time_elapsed= 4min 51s
+  Epoch  99: train=0.0804, val=0.0941, rmse=0.5690, Time_elapsed= 4min 54s
+  Epoch 100: train=0.0800, val=0.0943, rmse=0.5698, Time_elapsed= 4min 57s
+  Epoch 101: train=0.0803, val=0.0944, rmse=0.5706, Time_elapsed= 5min  0s
+  Epoch 102: train=0.0791, val=0.0943, rmse=0.5704, Time_elapsed= 5min  3s
+  Epoch 103: train=0.0803, val=0.0944, rmse=0.5704, Time_elapsed= 5min  6s
+  Epoch 104: train=0.0796, val=0.0943, rmse=0.5698, Time_elapsed= 5min  9s
+  Epoch 105: train=0.0795, val=0.0941, rmse=0.5693, Time_elapsed= 5min 12s
+  Epoch 106: train=0.0793, val=0.0941, rmse=0.5686, Time_elapsed= 5min 14s
+  Epoch 107: train=0.0801, val=0.0942, rmse=0.5702, Time_elapsed= 5min 17s
+  Epoch 108: train=0.0794, val=0.0942, rmse=0.5699, Time_elapsed= 5min 20s
+  Epoch 109: train=0.0793, val=0.0942, rmse=0.5699, Time_elapsed= 5min 23s
+  Epoch 110: train=0.0790, val=0.0942, rmse=0.5698, Time_elapsed= 5min 26s
+  Epoch 111: train=0.0798, val=0.0941, rmse=0.5693, Time_elapsed= 5min 29s
+  Epoch 112: train=0.0800, val=0.0942, rmse=0.5696, Time_elapsed= 5min 32s
+  Epoch 113: train=0.0797, val=0.0942, rmse=0.5697, Time_elapsed= 5min 35s
+  Epoch 114: train=0.0795, val=0.0942, rmse=0.5698, Time_elapsed= 5min 37s
+  Epoch 115: train=0.0797, val=0.0942, rmse=0.5697, Time_elapsed= 5min 40s
+  Epoch 116: train=0.0798, val=0.0941, rmse=0.5694, Time_elapsed= 5min 43s
+  Epoch 117: train=0.0801, val=0.0942, rmse=0.5701, Time_elapsed= 5min 46s
+  Epoch 118: train=0.0793, val=0.0941, rmse=0.5696, Time_elapsed= 5min 49s
+  Epoch 119: train=0.0793, val=0.0942, rmse=0.5699, Time_elapsed= 5min 52s
+  Epoch 120: train=0.0797, val=0.0942, rmse=0.5696, Time_elapsed= 5min 55s
+  Epoch 121: train=0.0797, val=0.0941, rmse=0.5695, Time_elapsed= 5min 58s
+  Epoch 122: train=0.0793, val=0.0941, rmse=0.5694, Time_elapsed= 6min  1s
+  Epoch 123: train=0.0796, val=0.0941, rmse=0.5695, Time_elapsed= 6min  4s
+  Epoch 124: train=0.0794, val=0.0942, rmse=0.5695, Time_elapsed= 6min  6s
+  Epoch 125: train=0.0794, val=0.0942, rmse=0.5695, Time_elapsed= 6min  9s
+  Epoch 126: train=0.0797, val=0.0942, rmse=0.5697, Time_elapsed= 6min 12s
+  Epoch 127: train=0.0793, val=0.0942, rmse=0.5697, Time_elapsed= 6min 15s
+  Epoch 128: train=0.0792, val=0.0942, rmse=0.5698, Time_elapsed= 6min 18s
+  Epoch 129: train=0.0797, val=0.0942, rmse=0.5697, Time_elapsed= 6min 21s
+  Epoch 130: train=0.0795, val=0.0942, rmse=0.5697, Time_elapsed= 6min 24s
+  Epoch 131: train=0.0796, val=0.0942, rmse=0.5697, Time_elapsed= 6min 27s
+  Epoch 132: train=0.0793, val=0.0942, rmse=0.5696, Time_elapsed= 6min 30s
+  Epoch 133: train=0.0801, val=0.0942, rmse=0.5697, Time_elapsed= 6min 33s
+  Epoch 134: train=0.0798, val=0.0942, rmse=0.5697, Time_elapsed= 6min 36s
+  Epoch 135: train=0.0794, val=0.0942, rmse=0.5697, Time_elapsed= 6min 38s
+  Epoch 136: train=0.0799, val=0.0942, rmse=0.5697, Time_elapsed= 6min 41s
+  Epoch 137: train=0.0798, val=0.0942, rmse=0.5697, Time_elapsed= 6min 44s
+  Epoch 138: train=0.0797, val=0.0942, rmse=0.5696, Time_elapsed= 6min 47s
+  Epoch 139: train=0.0798, val=0.0942, rmse=0.5697, Time_elapsed= 6min 50s
+  Epoch 140: train=0.0798, val=0.0942, rmse=0.5697, Time_elapsed= 6min 53s
+  Epoch 141: train=0.0798, val=0.0942, rmse=0.5697, Time_elapsed= 6min 56s
+  Early stop at epoch 141
+[VAL] seed 42 fold 3 at Huber loss=0.09410 | RMSE=0.5693
+
+------------------------------------------------------------
+Fold 4/5 (seed 42)
+------------------------------------------------------------
+[Device] Training on mps
+  Epoch   1: train=0.3347, val=0.1682, rmse=0.7955, Time_elapsed= 0min  2s
+  Epoch   2: train=0.2038, val=0.1401, rmse=0.7112, Time_elapsed= 0min  5s
+  Epoch   3: train=0.1848, val=0.1362, rmse=0.6809, Time_elapsed= 0min  8s
+  Epoch   4: train=0.1678, val=0.1349, rmse=0.6830, Time_elapsed= 0min 11s
+  Epoch   5: train=0.1609, val=0.1200, rmse=0.6501, Time_elapsed= 0min 14s
+  Epoch   6: train=0.1535, val=0.1186, rmse=0.6423, Time_elapsed= 0min 17s
+  Epoch   7: train=0.1502, val=0.1153, rmse=0.6381, Time_elapsed= 0min 20s
+  Epoch   8: train=0.1468, val=0.1169, rmse=0.6389, Time_elapsed= 0min 23s
+  Epoch   9: train=0.1434, val=0.1283, rmse=0.6607, Time_elapsed= 0min 26s
+  Epoch  10: train=0.1397, val=0.1124, rmse=0.6351, Time_elapsed= 0min 29s
+  Epoch  11: train=0.1380, val=0.1220, rmse=0.6496, Time_elapsed= 0min 31s
+  Epoch  12: train=0.1369, val=0.1124, rmse=0.6294, Time_elapsed= 0min 34s
+  Epoch  13: train=0.1333, val=0.1127, rmse=0.6390, Time_elapsed= 0min 37s
+  Epoch  14: train=0.1316, val=0.1130, rmse=0.6587, Time_elapsed= 0min 40s
+  Epoch  15: train=0.1321, val=0.1133, rmse=0.6458, Time_elapsed= 0min 43s
+  Epoch  16: train=0.1279, val=0.1226, rmse=0.6599, Time_elapsed= 0min 46s
+  Epoch  17: train=0.1281, val=0.1078, rmse=0.6269, Time_elapsed= 0min 49s
+  Epoch  18: train=0.1269, val=0.1127, rmse=0.6280, Time_elapsed= 0min 52s
+  Epoch  19: train=0.1256, val=0.1116, rmse=0.6255, Time_elapsed= 0min 55s
+  Epoch  20: train=0.1241, val=0.1087, rmse=0.6295, Time_elapsed= 0min 58s
+  Epoch  21: train=0.1219, val=0.1081, rmse=0.6220, Time_elapsed= 1min  1s
+  Epoch  22: train=0.1194, val=0.1043, rmse=0.6202, Time_elapsed= 1min  4s
+  Epoch  23: train=0.1192, val=0.1084, rmse=0.6268, Time_elapsed= 1min  7s
+  Epoch  24: train=0.1199, val=0.1072, rmse=0.6270, Time_elapsed= 1min  9s
+  Epoch  25: train=0.1192, val=0.1053, rmse=0.6109, Time_elapsed= 1min 12s
+  Epoch  26: train=0.1177, val=0.1062, rmse=0.6269, Time_elapsed= 1min 15s
+  Epoch  27: train=0.1159, val=0.1015, rmse=0.6142, Time_elapsed= 1min 18s
+  Epoch  28: train=0.1151, val=0.1110, rmse=0.6393, Time_elapsed= 1min 21s
+  Epoch  29: train=0.1142, val=0.1039, rmse=0.6325, Time_elapsed= 1min 24s
+  Epoch  30: train=0.1136, val=0.1066, rmse=0.6201, Time_elapsed= 1min 27s
+  Epoch  31: train=0.1130, val=0.1027, rmse=0.6042, Time_elapsed= 1min 30s
+  Epoch  32: train=0.1145, val=0.1104, rmse=0.6298, Time_elapsed= 1min 33s
+  Epoch  33: train=0.1143, val=0.1093, rmse=0.6315, Time_elapsed= 1min 35s
+  Epoch  34: train=0.1047, val=0.0990, rmse=0.5958, Time_elapsed= 1min 38s
+  Epoch  35: train=0.1019, val=0.0997, rmse=0.5988, Time_elapsed= 1min 41s
+  Epoch  36: train=0.1004, val=0.1020, rmse=0.6015, Time_elapsed= 1min 44s
+  Epoch  37: train=0.1005, val=0.1019, rmse=0.6040, Time_elapsed= 1min 47s
+  Epoch  38: train=0.1014, val=0.1004, rmse=0.5986, Time_elapsed= 1min 50s
+  Epoch  39: train=0.0999, val=0.1010, rmse=0.5984, Time_elapsed= 1min 53s
+  Epoch  40: train=0.0992, val=0.1016, rmse=0.5986, Time_elapsed= 1min 56s
+  Epoch  41: train=0.0940, val=0.0938, rmse=0.5822, Time_elapsed= 1min 59s
+  Epoch  42: train=0.0928, val=0.0939, rmse=0.5790, Time_elapsed= 2min  1s
+  Epoch  43: train=0.0919, val=0.0940, rmse=0.5842, Time_elapsed= 2min  4s
+  Epoch  44: train=0.0912, val=0.0949, rmse=0.5873, Time_elapsed= 2min  7s
+  Epoch  45: train=0.0915, val=0.0946, rmse=0.5855, Time_elapsed= 2min 10s
+  Epoch  46: train=0.0910, val=0.0938, rmse=0.5832, Time_elapsed= 2min 13s
+  Epoch  47: train=0.0902, val=0.0940, rmse=0.5828, Time_elapsed= 2min 16s
+  Epoch  48: train=0.0889, val=0.0948, rmse=0.5843, Time_elapsed= 2min 19s
+  Epoch  49: train=0.0879, val=0.0936, rmse=0.5802, Time_elapsed= 2min 22s
+  Epoch  50: train=0.0876, val=0.0932, rmse=0.5799, Time_elapsed= 2min 25s
+  Epoch  51: train=0.0858, val=0.0936, rmse=0.5820, Time_elapsed= 2min 28s
+  Epoch  52: train=0.0870, val=0.0929, rmse=0.5796, Time_elapsed= 2min 31s
+  Epoch  53: train=0.0864, val=0.0931, rmse=0.5816, Time_elapsed= 2min 34s
+  Epoch  54: train=0.0862, val=0.0930, rmse=0.5824, Time_elapsed= 2min 37s
+  Epoch  55: train=0.0861, val=0.0935, rmse=0.5830, Time_elapsed= 2min 40s
+  Epoch  56: train=0.0854, val=0.0934, rmse=0.5811, Time_elapsed= 2min 43s
+  Epoch  57: train=0.0857, val=0.0929, rmse=0.5750, Time_elapsed= 2min 46s
+  Epoch  58: train=0.0857, val=0.0936, rmse=0.5819, Time_elapsed= 2min 49s
+  Epoch  59: train=0.0851, val=0.0933, rmse=0.5770, Time_elapsed= 2min 52s
+  Epoch  60: train=0.0848, val=0.0927, rmse=0.5748, Time_elapsed= 2min 56s
+  Epoch  61: train=0.0852, val=0.0948, rmse=0.5804, Time_elapsed= 2min 59s
+  Epoch  62: train=0.0851, val=0.0929, rmse=0.5745, Time_elapsed= 3min  2s
+  Epoch  63: train=0.0838, val=0.0941, rmse=0.5821, Time_elapsed= 3min  5s
+  Epoch  64: train=0.0832, val=0.0933, rmse=0.5790, Time_elapsed= 3min  8s
+  Epoch  65: train=0.0842, val=0.0945, rmse=0.5825, Time_elapsed= 3min 11s
+  Epoch  66: train=0.0835, val=0.0931, rmse=0.5806, Time_elapsed= 3min 14s
+  Epoch  67: train=0.0829, val=0.0920, rmse=0.5728, Time_elapsed= 3min 17s
+  Epoch  68: train=0.0827, val=0.0923, rmse=0.5772, Time_elapsed= 3min 20s
+  Epoch  69: train=0.0822, val=0.0919, rmse=0.5762, Time_elapsed= 3min 23s
+  Epoch  70: train=0.0823, val=0.0917, rmse=0.5752, Time_elapsed= 3min 26s
+  Epoch  71: train=0.0816, val=0.0921, rmse=0.5767, Time_elapsed= 3min 28s
+  Epoch  72: train=0.0809, val=0.0926, rmse=0.5764, Time_elapsed= 3min 31s
+  Epoch  73: train=0.0814, val=0.0926, rmse=0.5766, Time_elapsed= 3min 34s
+  Epoch  74: train=0.0811, val=0.0926, rmse=0.5787, Time_elapsed= 3min 37s
+  Epoch  75: train=0.0816, val=0.0925, rmse=0.5753, Time_elapsed= 3min 40s
+  Epoch  76: train=0.0811, val=0.0924, rmse=0.5763, Time_elapsed= 3min 43s
+  Epoch  77: train=0.0805, val=0.0914, rmse=0.5734, Time_elapsed= 3min 46s
+  Epoch  78: train=0.0800, val=0.0918, rmse=0.5748, Time_elapsed= 3min 49s
+  Epoch  79: train=0.0799, val=0.0915, rmse=0.5714, Time_elapsed= 3min 52s
+  Epoch  80: train=0.0803, val=0.0916, rmse=0.5733, Time_elapsed= 3min 54s
+  Epoch  81: train=0.0804, val=0.0917, rmse=0.5740, Time_elapsed= 3min 57s
+  Epoch  82: train=0.0805, val=0.0915, rmse=0.5727, Time_elapsed= 4min  0s
+  Epoch  83: train=0.0796, val=0.0918, rmse=0.5729, Time_elapsed= 4min  3s
+  Epoch  84: train=0.0796, val=0.0910, rmse=0.5710, Time_elapsed= 4min  6s
+  Epoch  85: train=0.0787, val=0.0912, rmse=0.5715, Time_elapsed= 4min  9s
+  Epoch  86: train=0.0799, val=0.0913, rmse=0.5724, Time_elapsed= 4min 11s
+  Epoch  87: train=0.0791, val=0.0911, rmse=0.5710, Time_elapsed= 4min 14s
+  Epoch  88: train=0.0792, val=0.0913, rmse=0.5720, Time_elapsed= 4min 17s
+  Epoch  89: train=0.0797, val=0.0913, rmse=0.5730, Time_elapsed= 4min 20s
+  Epoch  90: train=0.0788, val=0.0913, rmse=0.5710, Time_elapsed= 4min 23s
+  Epoch  91: train=0.0791, val=0.0912, rmse=0.5714, Time_elapsed= 4min 26s
+  Epoch  92: train=0.0786, val=0.0911, rmse=0.5714, Time_elapsed= 4min 29s
+  Epoch  93: train=0.0789, val=0.0911, rmse=0.5712, Time_elapsed= 4min 32s
+  Epoch  94: train=0.0793, val=0.0912, rmse=0.5710, Time_elapsed= 4min 35s
+  Epoch  95: train=0.0785, val=0.0911, rmse=0.5716, Time_elapsed= 4min 38s
+  Epoch  96: train=0.0789, val=0.0912, rmse=0.5714, Time_elapsed= 4min 41s
+  Epoch  97: train=0.0788, val=0.0910, rmse=0.5709, Time_elapsed= 4min 44s
+  Epoch  98: train=0.0785, val=0.0911, rmse=0.5710, Time_elapsed= 4min 47s
+  Epoch  99: train=0.0793, val=0.0910, rmse=0.5709, Time_elapsed= 4min 51s
+  Epoch 100: train=0.0790, val=0.0911, rmse=0.5717, Time_elapsed= 4min 54s
+  Epoch 101: train=0.0782, val=0.0911, rmse=0.5712, Time_elapsed= 4min 57s
+  Epoch 102: train=0.0788, val=0.0911, rmse=0.5717, Time_elapsed= 5min  0s
+  Epoch 103: train=0.0785, val=0.0911, rmse=0.5718, Time_elapsed= 5min  3s
+  Epoch 104: train=0.0786, val=0.0911, rmse=0.5718, Time_elapsed= 5min  6s
+  Epoch 105: train=0.0789, val=0.0911, rmse=0.5718, Time_elapsed= 5min  9s
+  Epoch 106: train=0.0784, val=0.0911, rmse=0.5718, Time_elapsed= 5min 13s
+  Epoch 107: train=0.0784, val=0.0911, rmse=0.5717, Time_elapsed= 5min 16s
+  Epoch 108: train=0.0786, val=0.0911, rmse=0.5716, Time_elapsed= 5min 20s
+  Epoch 109: train=0.0784, val=0.0911, rmse=0.5715, Time_elapsed= 5min 23s
+  Epoch 110: train=0.0780, val=0.0911, rmse=0.5714, Time_elapsed= 5min 26s
+  Epoch 111: train=0.0784, val=0.0910, rmse=0.5715, Time_elapsed= 5min 29s
+  Epoch 112: train=0.0785, val=0.0910, rmse=0.5713, Time_elapsed= 5min 32s
+  Epoch 113: train=0.0787, val=0.0910, rmse=0.5713, Time_elapsed= 5min 36s
+  Epoch 114: train=0.0784, val=0.0910, rmse=0.5714, Time_elapsed= 5min 39s
+  Early stop at epoch 114
+[VAL] seed 42 fold 4 at Huber loss=0.09101 | RMSE=0.5710
+
+------------------------------------------------------------
+Fold 5/5 (seed 42)
+------------------------------------------------------------
+[Device] Training on mps
+  Epoch   1: train=0.3359, val=0.2217, rmse=0.9734, Time_elapsed= 0min  2s
+  Epoch   2: train=0.2072, val=0.1841, rmse=0.8807, Time_elapsed= 0min  5s
+  Epoch   3: train=0.1821, val=0.1439, rmse=0.7594, Time_elapsed= 0min  8s
+  Epoch   4: train=0.1658, val=0.1467, rmse=0.7544, Time_elapsed= 0min 11s
+  Epoch   5: train=0.1588, val=0.1325, rmse=0.7291, Time_elapsed= 0min 14s
+  Epoch   6: train=0.1525, val=0.1318, rmse=0.7027, Time_elapsed= 0min 17s
+  Epoch   7: train=0.1452, val=0.1241, rmse=0.6866, Time_elapsed= 0min 20s
+  Epoch   8: train=0.1458, val=0.1220, rmse=0.6832, Time_elapsed= 0min 23s
+  Epoch   9: train=0.1396, val=0.1181, rmse=0.6730, Time_elapsed= 0min 26s
+  Epoch  10: train=0.1377, val=0.1326, rmse=0.7068, Time_elapsed= 0min 29s
+  Epoch  11: train=0.1352, val=0.1222, rmse=0.6757, Time_elapsed= 0min 32s
+  Epoch  12: train=0.1348, val=0.1347, rmse=0.7143, Time_elapsed= 0min 35s
+  Epoch  13: train=0.1324, val=0.1231, rmse=0.6741, Time_elapsed= 0min 38s
+  Epoch  14: train=0.1282, val=0.1237, rmse=0.6829, Time_elapsed= 0min 41s
+  Epoch  15: train=0.1277, val=0.1196, rmse=0.6695, Time_elapsed= 0min 44s
+  Epoch  16: train=0.1166, val=0.1091, rmse=0.6368, Time_elapsed= 0min 46s
+  Epoch  17: train=0.1156, val=0.1077, rmse=0.6308, Time_elapsed= 0min 49s
+  Epoch  18: train=0.1152, val=0.1105, rmse=0.6407, Time_elapsed= 0min 52s
+  Epoch  19: train=0.1157, val=0.1081, rmse=0.6325, Time_elapsed= 0min 55s
+  Epoch  20: train=0.1134, val=0.1106, rmse=0.6398, Time_elapsed= 0min 58s
+  Epoch  21: train=0.1129, val=0.1085, rmse=0.6361, Time_elapsed= 1min  1s
+  Epoch  22: train=0.1125, val=0.1085, rmse=0.6260, Time_elapsed= 1min  4s
+  Epoch  23: train=0.1126, val=0.1119, rmse=0.6464, Time_elapsed= 1min  6s
+  Epoch  24: train=0.1071, val=0.1040, rmse=0.6254, Time_elapsed= 1min  9s
+  Epoch  25: train=0.1054, val=0.1030, rmse=0.6247, Time_elapsed= 1min 12s
+  Epoch  26: train=0.1054, val=0.1021, rmse=0.6188, Time_elapsed= 1min 15s
+  Epoch  27: train=0.1044, val=0.1037, rmse=0.6278, Time_elapsed= 1min 18s
+  Epoch  28: train=0.1046, val=0.1047, rmse=0.6285, Time_elapsed= 1min 21s
+  Epoch  29: train=0.1037, val=0.1023, rmse=0.6208, Time_elapsed= 1min 23s
+  Epoch  30: train=0.1040, val=0.1053, rmse=0.6248, Time_elapsed= 1min 26s
+  Epoch  31: train=0.1029, val=0.1028, rmse=0.6227, Time_elapsed= 1min 29s
+  Epoch  32: train=0.1023, val=0.1017, rmse=0.6190, Time_elapsed= 1min 32s
+  Epoch  33: train=0.1025, val=0.1030, rmse=0.6272, Time_elapsed= 1min 35s
+  Epoch  34: train=0.1020, val=0.1042, rmse=0.6249, Time_elapsed= 1min 38s
+  Epoch  35: train=0.1006, val=0.1019, rmse=0.6272, Time_elapsed= 1min 41s
+  Epoch  36: train=0.1002, val=0.1026, rmse=0.6266, Time_elapsed= 1min 43s
+  Epoch  37: train=0.1007, val=0.1031, rmse=0.6280, Time_elapsed= 1min 46s
+  Epoch  38: train=0.1000, val=0.1027, rmse=0.6218, Time_elapsed= 1min 49s
+  Epoch  39: train=0.0977, val=0.1008, rmse=0.6207, Time_elapsed= 1min 52s
+  Epoch  40: train=0.0959, val=0.1007, rmse=0.6233, Time_elapsed= 1min 55s
+  Epoch  41: train=0.0957, val=0.1011, rmse=0.6188, Time_elapsed= 1min 58s
+  Epoch  42: train=0.0954, val=0.1004, rmse=0.6174, Time_elapsed= 2min  1s
