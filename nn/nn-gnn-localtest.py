@@ -102,7 +102,6 @@ class Config:
     USE_PLAY_PLAYER_INPUT = True
 
 # === Utilities ===
-
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -160,14 +159,12 @@ def wrap_angle_deg(s):
     # Map to (-180, 180]
     return ((s + 180.0) % 360.0) - 180.0
 
-
 def build_play_direction_map(df_in: pd.DataFrame) -> pd.Series:
     return (
         df_in[["game_id", "play_id", "play_direction"]]
         .drop_duplicates()
         .set_index(["game_id", "play_id"])["play_direction"]
     )
-
 
 def unify_left_direction_ipt(df: pd.DataFrame) -> pd.DataFrame:
     if "play_direction" not in df.columns:
@@ -192,7 +189,6 @@ def unify_left_direction_ipt(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-
 def unify_left_direction_opt(df: pd.DataFrame, dir_map: dict) -> pd.DataFrame:
     df["play_direction"] = df.apply(
         lambda r: dir_map.get((r["game_id"], r["play_id"])), axis=1
@@ -208,19 +204,15 @@ def unify_left_direction_opt(df: pd.DataFrame, dir_map: dict) -> pd.DataFrame:
 
     return df
 
-
 def invert_to_original_direction(x_u, y_u, play_dir_right: bool):
-    """Invert unified (left) coordinates back to original play direction."""
     if not play_dir_right:
         return float(x_u), float(y_u)
     return float(Config.FIELD_X_MAX - x_u), float(Config.FIELD_Y_MAX - y_u)
-
 
 def _seed_dir(base_dir: Path, seed: int) -> Path:
     d = base_dir / f"seed_{seed}"
     d.mkdir(parents=True, exist_ok=True)
     return d
-
 
 def save_fold_artifacts_stt(
     seed: int, fold: int, scaler, model: nn.Module, base_dir: Path
@@ -228,7 +220,6 @@ def save_fold_artifacts_stt(
     sdir = _seed_dir(base_dir, seed)
     joblib.dump(scaler, sdir / f"scaler_fold{fold}.pkl")
     torch.save(model.state_dict(), sdir / f"model_fold{fold}.pt")
-
 
 def write_meta(feature_cols: list, base_dir: Path):
     # Ensure the base directory exists before writing metadata
@@ -245,7 +236,6 @@ def write_meta(feature_cols: list, base_dir: Path):
         json.dump(meta, f, indent=2)
     print(f"[META] wrote meta.json to {base_dir}")
 
-
 def write_cv_log(cv_log: list, all_rmse: list):
     # Ensure the save directory exists before writing CV metrics
     Config.SAVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -259,7 +249,6 @@ def write_cv_log(cv_log: list, all_rmse: list):
             indent=2,
         )
     print(f"\nCV metrics written to {Config.SAVE_DIR / 'cv_metrics.json'}")
-
 
 def load_saved_ensemble_stt(base_dir: Path, model_class: torch.nn.Module):
     meta_path = base_dir / "meta.json"
@@ -288,7 +277,6 @@ def load_saved_ensemble_stt(base_dir: Path, model_class: torch.nn.Module):
             models.append(m)
 
     return models, scalers, meta
-
 
 def prepare_targets_stt(batch_dx, batch_dy, max_h):
     tensors_x, tensors_y, masks = [], [], []

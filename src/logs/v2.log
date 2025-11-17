@@ -1,0 +1,144 @@
+ ~/nfl26/ [master*] /Users/goge/miniconda3/envs/chat/bin/python /Users/goge/nfl26/src/training.py
+using cuda_backend pandas for faster parallel data processing
+Current timetag: default
+
+[1/4] Loading training data
+Filtered input rows:  338
+Filtered output rows:  752
+
+[2/4] Feature Engine ering
+[09:49:48] [+] Added 'target_alignment' (4 cols) in 0.05s
+    Columns: ['velocity_alignment', 'velocity_perpendicular', 'accel_alignment', 'accel_perpendicular']
+[09:49:55] [+] Added 'lag' (24 cols) in 6.60s
+    Columns: ['velocity_x_lag1', 'velocity_x_diff_lag1', 'velocity_y_lag1', 'velocity_y_diff_lag1', 's_lag1', 's_diff_lag1', 'velocity_x_lag2', 'velocity_x_diff_lag2', 'velocity_y_lag2', 'velocity_y_diff_lag2', 's_lag2', 's_diff_lag2', 'velocity_x_lag3', 'velocity_x_diff_lag3', 'velocity_y_lag3', 'velocity_y_diff_lag3', 's_lag3', 's_diff_lag3', 'velocity_x_lag5', 'velocity_y_lag5', 's_lag5', 'velocity_x_lag10', 'velocity_y_lag10', 's_lag10']
+[09:49:56] [+] Added 'motion_change' (6 cols) in 1.10s
+    Columns: ['velocity_x_change', 'velocity_y_change', 's_change', 'a_change', 'dir_change', 'o_change']
+[09:49:56] [+] Added 'field_position' (7 cols) in 0.26s
+    Columns: ['dist_from_sideline', 'dist_from_endzone', 'field_zone_x', 'field_zone_y', 'in_red_zone', 'near_sideline', 'dist_from_center']
+[09:49:57] [+] Added 'distance_rate' (3 cols) in 0.42s
+    Columns: ['d2ball_dt', 'd2ball_ddt', 'time_to_intercept']
+[09:49:57] [+] Added 'geometric' (2 cols) in 0.10s
+    Columns: ['geo_endpoint_x', 'geo_endpoint_y']
+[09:50:09] [+] Added 'neighbor_gnn' (24 cols) in 11.85s
+    Columns: ['dx_ally_w_sum', 'dx_opp_w_sum', 'dy_ally_w_sum', 'dy_opp_w_sum', 'dvx_ally_w_sum', 'dvx_opp_w_sum', 'dvy_ally_w_sum', 'dvy_opp_w_sum', 'is_ally_sum', 'is_opp_sum', 'dist_ally_min', 'dist_ally_mean', 'dist_opp_min', 'dist_opp_mean', 'gnn_n1_dist', 'gnn_n2_dist', 'gnn_n3_dist', 'pressure', 'under_pressure', 'have_assistance', 'pressure_speed', 'ally_density', 'oppn_density', 'density_ratio']
+[09:50:09] [+] Added 'time' (5 cols) in 0.24s
+    Columns: ['time_to_end', 'time_urgency', 'time_dist_urgency', 'time_normalized_pass', 'time_normalized_all']
+[09:50:20] [+] Added 'passer' (4 cols) in 11.25s
+    Columns: ['passer_distance', 'v_to_passer_alignment', 'v_to_passer_perp', 'bearing_to_passer']
+100%|██████████████████████████████████████████████████████████████████████████████████| 173137/173137 [00:01<00:00, 107314.03it/s]
+[09:50:34] [+] Added 'curvature' (4 cols) in 14.20s
+    Columns: ['bearing_to_land_signed', 'land_lateral_offset', 'curvature_signed', 'curvature_abs']
+[09:50:47] [+] Added 'route' (8 cols) in 12.84s
+    Columns: ['speed_mean', 'speed_change', 'traj_straightness', 'traj_depth', 'traj_width', 'traj_direction_angle', 'traj_max_turn', 'traj_mean_turn']
+[09:50:57] [+] Added 'receiver' (4 cols) in 10.12s
+    Columns: ['receiver_distance', 'v_to_receiver_alignment', 'v_to_receiver_perp', 'bearing_to_receiver']
+
+Total features created: 127
+[META] wrote meta.json to output/default
+
+[3/4] Training model...
+Created 14107 unique groups (game_play_id) for GroupKFold.
+
+======================================================================
+   Seed 42
+======================================================================
+
+------------------------------------------------------------
+Fold 1/5 (seed 42)
+------------------------------------------------------------
+  Epoch  10: train=0.1084, val=0.0881, Time_elapsed= 0min 57s
+  Epoch  20: train=0.0921, val=0.0744, Time_elapsed= 1min 53s
+  Epoch  30: train=0.0785, val=0.0602, Time_elapsed= 2min 48s
+  Epoch  40: train=0.0700, val=0.0512, Time_elapsed= 3min 44s
+  Epoch  50: train=0.0679, val=0.0505, Time_elapsed= 4min 39s
+  Epoch  60: train=0.0686, val=0.0511, Time_elapsed= 5min 35s
+  Epoch  70: train=0.0675, val=0.0504, Time_elapsed= 6min 31s
+  Epoch  80: train=0.0660, val=0.0500, Time_elapsed= 7min 29s
+  Epoch  90: train=0.0652, val=0.0500, Time_elapsed= 8min 24s
+  Epoch 100: train=0.0659, val=0.0496, Time_elapsed= 9min 20s
+  Epoch 110: train=0.0649, val=0.0496, Time_elapsed=10min 15s
+  Epoch 120: train=0.0652, val=0.0496, Time_elapsed=11min 10s
+  Early stop at epoch 127
+[VAL] seed 42 fold 1 → Huber loss=0.04954 | RMSE=0.4618
+
+------------------------------------------------------------
+Fold 2/5 (seed 42)
+------------------------------------------------------------
+  Epoch  10: train=0.1112, val=0.0753, Time_elapsed= 0min 57s
+  Epoch  20: train=0.0877, val=0.0600, Time_elapsed= 1min 55s
+  Epoch  30: train=0.0793, val=0.0612, Time_elapsed= 2min 52s
+  Epoch  40: train=0.0728, val=0.0540, Time_elapsed= 3min 48s
+  Epoch  50: train=0.0716, val=0.0518, Time_elapsed= 4min 46s
+  Epoch  60: train=0.0701, val=0.0492, Time_elapsed= 5min 43s
+  Epoch  70: train=0.0686, val=0.0475, Time_elapsed= 6min 39s
+  Epoch  80: train=0.0678, val=0.0473, Time_elapsed= 7min 36s
+  Epoch  90: train=0.0678, val=0.0475, Time_elapsed= 8min 33s
+  Epoch 100: train=0.0670, val=0.0475, Time_elapsed= 9min 29s
+  Epoch 110: train=0.0676, val=0.0476, Time_elapsed=10min 25s
+  Early stop at epoch 110
+[VAL] seed 42 fold 2 → Huber loss=0.04727 | RMSE=0.4380
+
+------------------------------------------------------------
+Fold 3/5 (seed 42)
+------------------------------------------------------------
+  Epoch  10: train=0.1110, val=0.0733, Time_elapsed= 0min 56s
+  Epoch  20: train=0.0952, val=0.0647, Time_elapsed= 1min 52s
+  Epoch  30: train=0.0781, val=0.0576, Time_elapsed= 2min 48s
+  Epoch  40: train=0.0748, val=0.0547, Time_elapsed= 3min 45s
+  Epoch  50: train=0.0701, val=0.0653, Time_elapsed= 4min 41s
+  Epoch  60: train=0.0663, val=0.0514, Time_elapsed= 5min 39s
+  Epoch  70: train=0.0621, val=0.0493, Time_elapsed= 6min 35s
+  Epoch  80: train=0.0624, val=0.0512, Time_elapsed= 7min 31s
+  Epoch  90: train=0.0600, val=0.0486, Time_elapsed= 8min 27s
+  Epoch 100: train=0.0586, val=0.0464, Time_elapsed= 9min 23s
+  Epoch 110: train=0.0580, val=0.0461, Time_elapsed=10min 19s
+  Epoch 120: train=0.0585, val=0.0460, Time_elapsed=11min 16s
+  Epoch 130: train=0.0580, val=0.0460, Time_elapsed=12min 12s
+  Epoch 140: train=0.0579, val=0.0460, Time_elapsed=13min  8s
+  Early stop at epoch 147
+[VAL] seed 42 fold 3 → Huber loss=0.04593 | RMSE=0.4064
+
+------------------------------------------------------------
+Fold 4/5 (seed 42)
+------------------------------------------------------------
+  Epoch  10: train=0.1063, val=0.0855, Time_elapsed= 0min 56s
+  Epoch  20: train=0.0834, val=0.0570, Time_elapsed= 1min 53s
+  Epoch  30: train=0.0803, val=0.0628, Time_elapsed= 2min 49s
+  Epoch  40: train=0.0743, val=0.0568, Time_elapsed= 3min 45s
+  Epoch  50: train=0.0703, val=0.0511, Time_elapsed= 4min 41s
+  Epoch  60: train=0.0675, val=0.0485, Time_elapsed= 5min 37s
+  Epoch  70: train=0.0661, val=0.0486, Time_elapsed= 6min 33s
+  Epoch  80: train=0.0655, val=0.0488, Time_elapsed= 7min 30s
+  Epoch  90: train=0.0639, val=0.0483, Time_elapsed= 8min 26s
+  Epoch 100: train=0.0645, val=0.0482, Time_elapsed= 9min 23s
+  Epoch 110: train=0.0637, val=0.0478, Time_elapsed=10min 20s
+  Epoch 120: train=0.0649, val=0.0477, Time_elapsed=11min 15s
+  Epoch 130: train=0.0635, val=0.0477, Time_elapsed=12min 11s
+  Epoch 140: train=0.0637, val=0.0477, Time_elapsed=13min  7s
+  Epoch 150: train=0.0643, val=0.0477, Time_elapsed=14min  4s
+  Early stop at epoch 153
+[VAL] seed 42 fold 4 → Huber loss=0.04760 | RMSE=0.3921
+
+------------------------------------------------------------
+Fold 5/5 (seed 42)
+------------------------------------------------------------
+  Epoch  10: train=0.1127, val=0.0727, Time_elapsed= 0min 56s
+  Epoch  20: train=0.0891, val=0.0615, Time_elapsed= 1min 53s
+  Epoch  30: train=0.0820, val=0.0567, Time_elapsed= 2min 49s
+  Epoch  40: train=0.0749, val=0.0504, Time_elapsed= 3min 45s
+  Epoch  50: train=0.0701, val=0.0474, Time_elapsed= 4min 41s
+  Epoch  60: train=0.0685, val=0.0467, Time_elapsed= 5min 38s
+  Epoch  70: train=0.0673, val=0.0461, Time_elapsed= 6min 34s
+  Epoch  80: train=0.0658, val=0.0450, Time_elapsed= 7min 30s
+  Epoch  90: train=0.0636, val=0.0443, Time_elapsed= 8min 26s
+  Epoch 100: train=0.0651, val=0.0444, Time_elapsed= 9min 23s
+  Epoch 110: train=0.0651, val=0.0443, Time_elapsed=10min 19s
+  Epoch 120: train=0.0637, val=0.0443, Time_elapsed=11min 16s
+  Early stop at epoch 123
+[VAL] seed 42 fold 5 → Huber loss=0.04422 | RMSE=0.4141
+[SEED SUMMARY] seed 42 RMSEs: ['0.4618', '0.4380', '0.4064', '0.3921', '0.4141'] | mean=0.4225 yards
+
+[CV SUMMARY] all folds RMSEs: ['0.4618', '0.4380', '0.4064', '0.3921', '0.4141']
+[CV SUMMARY] overall mean RMSE = 0.4225 yards
+
+CV metrics written to output/default/cv_metrics.json
