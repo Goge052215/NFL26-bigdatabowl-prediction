@@ -115,6 +115,9 @@ def train_model_stt(
                 print(f"  Early stop at epoch {epoch}")
                 break
 
+        # best epoch, 根据这个epoch再跑全数据 -> pth, pkl save
+        #
+
     if best_state:
         model.load_state_dict(best_state)
 

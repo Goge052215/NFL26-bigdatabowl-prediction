@@ -263,8 +263,8 @@ class FeatureEngineer:
         df["dist_from_endzone"] = np.minimum(df["x"], Config.FIELD_X_MAX - df["x"])
         df["field_zone_x"] = (df["x"] / Config.FIELD_X_MAX * 5).astype(int).clip(0, 4)
         df["field_zone_y"] = (df["y"] / Config.FIELD_Y_MAX * 3).astype(int).clip(0, 2)
-        df["in_red_zone"] = (df["dist_from_endzone"] < 20).astype(np.int8)
-        df["near_sideline"] = (df["dist_from_sideline"] < 5).astype(np.int8)
+        df["in_red_zone"] = (df["dist_from_endzone"].fillna(np.inf) < 20).astype(np.int8)
+        df["near_sideline"] = (df["dist_from_sideline"].fillna(np.inf) < 5).astype(np.int8)
         df["dist_from_center"] = np.hypot(
             df["x"] - Config.FIELD_X_MAX / 2, df["y"] - Config.FIELD_Y_MAX / 2
         )

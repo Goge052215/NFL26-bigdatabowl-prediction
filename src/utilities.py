@@ -124,11 +124,21 @@ def _seed_dir(base_dir: Path, seed: int) -> Path:
     return d
 
 
+class MinimalScaler:
+    def __init__(self, mean, scale):
+        self.mean_ = np.asarray(mean, dtype=np.float32)
+        self.scale_ = np.asarray(scale, dtype=np.float32)
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=np.float32)
+        return (X - self.mean_) / (self.scale_ + 1e-8)
+
+
 def save_fold_artifacts_stt(
     seed: int, fold: int, scaler, model: nn.Module, base_dir: Path
 ):
     sdir = _seed_dir(base_dir, seed)
-    joblib.dump(scaler, sdir / f"scaler_fold{fold}.pkl")
+    np.savez(sdir / f"scaler_fold{fold}.npz", mean=scaler.mean_, scale=scaler.scale_)
     torch.save(model.state_dict(), sdir / f"model_fold{fold}.pt")
 
 
@@ -174,12 +184,28 @@ def load_saved_ensemble_stt(base_dir: Path, model_class: torch.nn.Module):
     for seed in seeds:
         sdir = base_dir / f"seed_{seed}"
         for fold in range(1, n_folds + 1):
+            sc_npz = sdir / f"scaler_fold{fold}.npz"
             sc_path = sdir / f"scaler_fold{fold}.pkl"
             model_path = sdir / f"model_fold{fold}.pt"
             if not (sc_path.exists() and model_path.exists()):
-                print(f"[WARN] missing seed={seed} fold={fold}, skip")
-                continue
-            scaler = joblib.load(sc_path)
+                if not (sc_npz.exists() and model_path.exists()):
+                    print(f"[WARN] missing seed={seed} fold={fold}, skip")
+                    continue
+            if sc_npz.exists():
+                data = np.load(sc_npz)
+                scaler = MinimalScaler(data["mean"], data["scale"]) 
+            else:
+                try:
+                    obj = joblib.load(sc_path)
+                    mean = getattr(obj, "mean_", None)
+                    scale = getattr(obj, "scale_", None)
+                    if mean is not None and scale is not None:
+                        scaler = MinimalScaler(mean, scale)
+                    else:
+                        scaler = obj
+                except Exception:
+                    print(f"[WARN] failed to load scaler for seed={seed} fold={fold}")
+                    continue
             m = model_class(len(feature_cols)).to(Config.DEVICE)
             m.load_state_dict(torch.load(model_path, map_location=Config.DEVICE))
             m.eval()

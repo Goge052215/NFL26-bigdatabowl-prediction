@@ -10,11 +10,11 @@ class Config:
 
     # Status flag
     TRAIN = not is_kaggle()
-    LOCAL = True
+    LOCAL = False
     SUBMIT = not TRAIN
 
     # Debug mode: check pipeline integrity
-    DEBUG = True
+    DEBUG = False
     DEBUG_SIZE = 1
 
     PREFIX = "/kaggle/input/"

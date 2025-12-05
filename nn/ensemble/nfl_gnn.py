@@ -1,3 +1,5 @@
+# %%writefile nfl_gnn.py
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -15,10 +17,6 @@ from multiprocessing import Pool as MultiprocessingPool, cpu_count
 
 warnings.filterwarnings('ignore')
 
-# ============================================================================
-# CONFIG
-# ============================================================================
-
 class Config:
     DATA_DIR = Path("/kaggle/input/nfl-big-data-bowl-2026-prediction/")
     OUTPUT_DIR = Path("./outputs")
@@ -28,35 +26,32 @@ class Config:
     MODEL_DIR.mkdir(exist_ok=True)
     # Toggle saving/loading of artifacts
     SAVE_ARTIFACTS = True
-    LOAD_ARTIFACTS = True
-    LOAD_DIR = '/kaggle/input/nfl-bdb-2026/nfl-gnn-a43/outputs/models'
+    LOAD_ARTIFACTS = False
+    LOAD_DIR = '/kaggle/input/nfl-gnn-a43/outputs/models'
   
     SEED = 42
     N_FOLDS = 10
     BATCH_SIZE = 256
-    EPOCHS = 210
+    EPOCHS = 200
     PATIENCE = 30
-    LEARNING_RATE = 1e-3
+    LEARNING_RATE = 6e-4
     
     WINDOW_SIZE = 10
     HIDDEN_DIM = 128
     MAX_FUTURE_HORIZON = 94
     
-    # === Transformer 超参数 ===
-    N_HEADS = 4  # Transformer 的注意力头数
-    N_LAYERS = 2 # Transformer 编码器的层数
+    N_HEADS = 4
+    N_LAYERS = 2
     
-    # === 新增：ResidualMLP Head 超参数 ===
-    MLP_HIDDEN_DIM = 256 # MLP 头的内部隐藏维度
-    N_RES_BLOCKS = 2     # 残差块的数量
-    # ==================================
+    MLP_HIDDEN_DIM = 256
+    N_RES_BLOCKS = 2
     
     FIELD_X_MIN, FIELD_X_MAX = 0.0, 120.0
     FIELD_Y_MIN, FIELD_Y_MAX = 0.0, 53.3
     
-    K_NEIGH = 6
-    RADIUS = 30.0
-    TAU = 8.0
+    K_NEIGH = 3
+    RADIUS = 20.0
+    TAU = 5.0
     N_ROUTE_CLUSTERS = 7
     
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -74,79 +69,7 @@ def set_seed(seed=42):
 
 set_seed(Config.SEED)
 
-# ============================================================================
-# 🔄 PLAY DIRECTION NORMALIZATION (右基準に統一)
-# ============================================================================
-
-def unify_play_direction(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    プレイヤー方向の統一:
-      - 右方向基準に正規化
-      - 右なら (x, y) そのまま
-      - 左なら (x, y) -> (120 - x, 53.3 - y)
-      - 角度 (o, dir) も +180 度（mod 360）
-      - 最後に play_direction / playDirection を削除
-    """
-    if df is None or len(df) == 0:
-        return df
-
-    df = df.copy()
-    XMAX = Config.FIELD_X_MAX
-    YMAX = Config.FIELD_Y_MAX
-
-    # 検出: 列名のバリエーションに対応
-    dir_col = None
-    for cand in ['play_direction', 'playDirection']:
-        if cand in df.columns:
-            dir_col = cand
-            break
-
-    if dir_col is None:
-        # 正規化不要（既に統一済み or カラムなし）
-        return df
-
-    # left を True とするマスク（プレイ単位で一定になるはず）
-    is_left_series = df[dir_col].astype(str).str.lower().str.startswith('l')
-    if {'game_id', 'play_id'}.issubset(df.columns):
-        # プレイ単位でブロードキャスト（firstで十分）
-        play_left = (df.groupby(['game_id', 'play_id'])[dir_col]
-                       .transform('first')
-                       .astype(str).str.lower().str.startswith('l'))
-        flip = play_left.fillna(False).values
-    else:
-        flip = is_left_series.fillna(False).values
-
-    # 数値カラムの反転
-    x_cols = [c for c in ['x', 'ball_land_x', 'ball_snap_x', 'ball_x'] if c in df.columns]
-    y_cols = [c for c in ['y', 'ball_land_y', 'ball_snap_y', 'ball_y'] if c in df.columns]
-
-    if any(x_cols):
-        for c in x_cols:
-            df.loc[flip, c] = XMAX - df.loc[flip, c]
-    if any(y_cols):
-        for c in y_cols:
-            df.loc[flip, c] = YMAX - df.loc[flip, c]
-
-    # 角度（o, dir）は 180 度回転
-    for ang_col in ['o', 'dir']:
-        if ang_col in df.columns:
-            df.loc[flip, ang_col] = (df.loc[flip, ang_col] + 180.0) % 360.0
-
-    # play_direction カラムを削除
-    if dir_col in df.columns:
-        df.drop(columns=[dir_col], inplace=True)
-
-    return df
-
-# ============================================================================
-# GEOMETRIC BASELINE - THE BREAKTHROUGH
-# ============================================================================
-
 def compute_geometric_endpoint(df):
-    """
-    Compute where each player SHOULD end up based on geometry.
-    This is the deterministic part - no learning needed.
-    """
     df = df.copy()
     
     # Time to play end
@@ -188,7 +111,6 @@ def compute_geometric_endpoint(df):
     return df
 
 def add_geometric_features(df):
-    """Add features that describe the geometric solution"""
     df = compute_geometric_endpoint(df)
     
     # Vector to geometric endpoint
@@ -229,10 +151,6 @@ def add_geometric_features(df):
     
     return df
 
-# ============================================================================
-# PROVEN FEATURE ENGINEERING (YOUR 0.59 BASE)
-# ============================================================================
-
 def get_velocity(speed, direction_deg):
     theta = np.deg2rad(direction_deg)
     return speed * np.sin(theta), speed * np.cos(theta)
@@ -249,7 +167,7 @@ def get_opponent_features(input_df):
     features = []
     
     for (gid, pid), group in tqdm(input_df.groupby(['game_id', 'play_id']), 
-                                   desc="🏈 Opponents", leave=False):
+                                   desc="Opponents", leave=False):
         last = group.sort_values('frame_id').groupby('nfl_id').last()
         
         if len(last) < 2:
@@ -324,7 +242,6 @@ def get_opponent_features(input_df):
     return pd.DataFrame(features)
 
 def extract_route_patterns(input_df, kmeans=None, scaler=None, fit=True):
-    """Route clustering"""
     route_features = []
     
     for (gid, pid, nid), group in tqdm(input_df.groupby(['game_id', 'play_id', 'nfl_id']), 
@@ -384,11 +301,10 @@ def extract_route_patterns(input_df, kmeans=None, scaler=None, fit=True):
 
 def compute_neighbor_embeddings(input_df, k_neigh=Config.K_NEIGH, 
                                 radius=Config.RADIUS, tau=Config.TAU):
-    """GNN-lite embeddings"""
-    print("🕸️  GNN embeddings...")
+    print("GNN embeddings...")
     
     cols_needed = ["game_id", "play_id", "nfl_id", "frame_id", "x", "y", 
-                   "velocity_x", "velocity_y", "player_side"]
+                   "velocity_x", "velocity_y", "player_side", "dir"]
     src = input_df[cols_needed].copy()
     
     last = (src.sort_values(["game_id", "play_id", "nfl_id", "frame_id"])
@@ -421,6 +337,18 @@ def compute_neighbor_embeddings(input_df, k_neigh=Config.K_NEIGH,
         tmp = tmp[tmp["dist"] <= radius]
     
     tmp["is_ally"] = (tmp["player_side_nb"] == tmp["player_side"]).astype(np.float32)
+
+    tmp["nx"] = tmp["dx"] / tmp["dist"]
+    tmp["ny"] = tmp["dy"] / tmp["dist"]
+    if "dir" in tmp.columns:
+        tmp["dir_rad"] = np.deg2rad(tmp["dir"].astype(float))
+    else:
+        tmp["dir_rad"] = 0.0
+    tmp["hvx"] = np.sin(tmp["dir_rad"])
+    tmp["hvy"] = np.cos(tmp["dir_rad"])
+    tmp["align"] = tmp["hvx"] * tmp["nx"] + tmp["hvy"] * tmp["ny"]
+    tmp["los_rel"] = tmp["dvx"] * tmp["nx"] + tmp["dvy"] * tmp["ny"]
+    tmp["tan_rel"] = tmp["dvx"] * (-tmp["ny"]) + tmp["dvy"] * tmp["nx"]
     
     keys = ["game_id", "play_id", "nfl_id"]
     tmp["rnk"] = tmp.groupby(keys)["dist"].rank(method="first")
@@ -437,6 +365,14 @@ def compute_neighbor_embeddings(input_df, k_neigh=Config.K_NEIGH,
     for col in ["dx", "dy", "dvx", "dvy"]:
         tmp[f"{col}_ally_w"] = tmp[col] * tmp["wn_ally"]
         tmp[f"{col}_opp_w"] = tmp[col] * tmp["wn_opp"]
+    tmp["los_ally_w"] = tmp["los_rel"] * tmp["wn_ally"]
+    tmp["los_opp_w"] = tmp["los_rel"] * tmp["wn_opp"]
+    tmp["tan_ally_w"] = tmp["tan_rel"] * tmp["wn_ally"]
+    tmp["tan_opp_w"] = tmp["tan_rel"] * tmp["wn_opp"]
+    tmp["align_ally_w"] = tmp["align"] * tmp["wn_ally"]
+    tmp["align_opp_w"] = tmp["align"] * tmp["wn_opp"]
+    tmp["dist_sq_ally_w"] = (tmp["dist"]**2) * tmp["wn_ally"]
+    tmp["dist_sq_opp_w"] = (tmp["dist"]**2) * tmp["wn_opp"]
     
     tmp["dist_ally"] = np.where(tmp["is_ally"] > 0.5, tmp["dist"], np.nan)
     tmp["dist_opp"] = np.where(tmp["is_ally"] < 0.5, tmp["dist"], np.nan)
@@ -450,6 +386,14 @@ def compute_neighbor_embeddings(input_df, k_neigh=Config.K_NEIGH,
         gnn_opp_dy_mean=("dy_opp_w", "sum"),
         gnn_opp_dvx_mean=("dvx_opp_w", "sum"),
         gnn_opp_dvy_mean=("dvy_opp_w", "sum"),
+        gnn_ally_los_mean=("los_ally_w", "sum"),
+        gnn_opp_los_mean=("los_opp_w", "sum"),
+        gnn_ally_tan_mean=("tan_ally_w", "sum"),
+        gnn_opp_tan_mean=("tan_opp_w", "sum"),
+        gnn_ally_align_mean=("align_ally_w", "sum"),
+        gnn_opp_align_mean=("align_opp_w", "sum"),
+        gnn_ally_dist_second_moment=("dist_sq_ally_w", "sum"),
+        gnn_opp_dist_second_moment=("dist_sq_opp_w", "sum"),
         gnn_ally_cnt=("is_ally", "sum"),
         gnn_opp_cnt=("is_ally", lambda s: float(len(s) - s.sum())),
         gnn_ally_dmin=("dist_ally", "min"),
@@ -464,35 +408,46 @@ def compute_neighbor_embeddings(input_df, k_neigh=Config.K_NEIGH,
         dwide = near.pivot_table(index=keys, columns="rnk", values="dist", aggfunc="first")
         dwide = dwide.rename(columns={1: "gnn_d1", 2: "gnn_d2", 3: "gnn_d3"}).reset_index()
         ag = ag.merge(dwide, on=keys, how="left")
+
+    top1 = tmp.loc[tmp["rnk"] == 1, keys + ["align", "los_rel"]].copy()
+    if len(top1) > 0:
+        t1 = top1.groupby(keys).agg(
+            gnn_top1_align=("align", "first"),
+            gnn_top1_los=("los_rel", "first"),
+        ).reset_index()
+        ag = ag.merge(t1, on=keys, how="left")
     
     for c in ["gnn_ally_dx_mean", "gnn_ally_dy_mean", "gnn_ally_dvx_mean", "gnn_ally_dvy_mean",
-              "gnn_opp_dx_mean", "gnn_opp_dy_mean", "gnn_opp_dvx_mean", "gnn_opp_dvy_mean"]:
-        ag[c] = ag[c].fillna(0.0)
+              "gnn_opp_dx_mean", "gnn_opp_dy_mean", "gnn_opp_dvx_mean", "gnn_opp_dvy_mean",
+              "gnn_ally_los_mean", "gnn_opp_los_mean", "gnn_ally_tan_mean", "gnn_opp_tan_mean",
+              "gnn_ally_align_mean", "gnn_opp_align_mean", "gnn_ally_dist_second_moment", "gnn_opp_dist_second_moment",
+              "gnn_top1_align", "gnn_top1_los"]:
+        if c not in ag.columns:
+            ag[c] = 0.0
+        else:
+            ag[c] = ag[c].fillna(0.0)
     for c in ["gnn_ally_cnt", "gnn_opp_cnt"]:
-        ag[c] = ag[c].fillna(0.0)
+        if c not in ag.columns:
+            ag[c] = 0.0
+        else:
+            ag[c] = ag[c].fillna(0.0)
+    default_val = radius if radius is not None else 30.0
     for c in ["gnn_ally_dmin", "gnn_opp_dmin", "gnn_ally_dmean", "gnn_opp_dmean", 
               "gnn_d1", "gnn_d2", "gnn_d3"]:
-        ag[c] = ag[c].fillna(radius if radius is not None else 30.0)
+        if c not in ag.columns:
+            ag[c] = default_val
+        else:
+            ag[c] = ag[c].fillna(default_val)
     
     return ag
 
-# ============================================================================
-# SEQUENCE PREPARATION WITH GEOMETRIC FEATURES
-# ============================================================================
-
 def prepare_sequences_geometric(input_df, output_df=None, test_template=None, 
                                 is_training=True, window_size=10,
-                                route_kmeans=None, route_scaler=None):
-    """YOUR 154 features + 13 geometric features = 167 total"""
-    
+                                route_kmeans=None, route_scaler=None,
+                                feature_cols_override=None, expected_dim=None):
     print(f"\n{'='*80}")
     print(f"PREPARING GEOMETRIC SEQUENCES")
     print(f"{'='*80}")
-    
-    # 🔄 まずプレイ方向を右基準に統一
-    input_df = unify_play_direction(input_df)
-    if is_training and output_df is not None:
-        output_df = unify_play_direction(output_df)
     
     input_df = input_df.copy()
     input_df = input_df.sort_values(['game_id', 'play_id', 'nfl_id', 'frame_id'])
@@ -653,12 +608,11 @@ def prepare_sequences_geometric(input_df, output_df=None, test_template=None,
         input_df['length_ratio'] = max_frames / 30.0
     
     # 🎯 THE BREAKTHROUGH: Add geometric features
-    print("Step 5: 🎯 Geometric endpoint features...")
+    print("Step 5: Geometric endpoint features...")
     input_df = add_geometric_features(input_df)
     
     print("Step 6: Building feature list...")
     
-    # Your 154 proven features
     feature_cols = [
         'x', 'y', 's', 'a', 'o', 'dir', 'frame_id', 'ball_land_x', 'ball_land_y',
         'player_height_feet', 'player_weight', 'height_inches', 'bmi',
@@ -681,6 +635,11 @@ def prepare_sequences_geometric(input_df, output_df=None, test_template=None,
         'gnn_ally_cnt', 'gnn_opp_cnt',
         'gnn_ally_dmin', 'gnn_ally_dmean', 'gnn_opp_dmin', 'gnn_opp_dmean',
         'gnn_d1', 'gnn_d2', 'gnn_d3',
+        'gnn_ally_los_mean', 'gnn_opp_los_mean',
+        'gnn_ally_tan_mean', 'gnn_opp_tan_mean',
+        'gnn_ally_align_mean', 'gnn_opp_align_mean',
+        'gnn_ally_dist_second_moment', 'gnn_opp_dist_second_moment',
+        'gnn_top1_align', 'gnn_top1_los',
     ]
     
     for lag in [1, 2, 3, 4, 5]:
@@ -715,6 +674,8 @@ def prepare_sequences_geometric(input_df, output_df=None, test_template=None,
     ])
     
     feature_cols = [c for c in feature_cols if c in input_df.columns]
+    if feature_cols_override is not None:
+        feature_cols = list(feature_cols_override)
     print(f"✓ Using {len(feature_cols)} features (154 proven + 13 geometric)")
     
     print("Step 7: Creating sequences...")
@@ -746,7 +707,16 @@ def prepare_sequences_geometric(input_df, output_df=None, test_template=None,
             input_window = pd.concat([pad_df, input_window], ignore_index=True)
         
         input_window = input_window.fillna(group_df.mean(numeric_only=True))
-        seq = input_window[feature_cols].values
+        seq_df = input_window.reindex(columns=feature_cols)
+        seq_df = seq_df.fillna(0.0)
+        seq = seq_df.values
+        if expected_dim is not None and seq.shape[1] != int(expected_dim):
+            if seq.shape[1] < int(expected_dim):
+                pad_cols = int(expected_dim) - seq.shape[1]
+                pad = np.zeros((seq.shape[0], pad_cols), dtype=np.float32)
+                seq = np.concatenate([seq, pad], axis=1)
+            else:
+                seq = seq[:, :int(expected_dim)]
         
         if np.isnan(seq).any():
             if is_training:
@@ -789,7 +759,7 @@ def prepare_sequences_geometric(input_df, output_df=None, test_template=None,
     
     if is_training:
         return (sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids, 
-                geo_endpoints_x, geo_endpoints_y, route_kmeans, route_scaler)
+                geo_endpoints_x, geo_endpoints_y, route_kmeans, route_scaler, feature_cols)
     return sequences, sequence_ids, geo_endpoints_x, geo_endpoints_y
 
 # ============================================================================
@@ -815,23 +785,20 @@ class ResidualBlock(nn.Module):
         return x + self.ffn(self.norm(x))
 
 class ResidualMLPHead(nn.Module):
-    """
-    替换原有的 nn.Sequential Head
-    """
     def __init__(self, input_dim, hidden_dim, output_dim, n_res_blocks=2, dropout=0.2):
         super().__init__()
-        # 1. 从 context_dim (128) 投影到 mlp_hidden_dim (256)
+        # 1. context_dim (128) proj to mlp_hidden_dim (256)
         self.input_layer = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.GELU()
         )
         
-        # 2. 一系列的残差块 (在 256 维度上操作)
+        # 2. residual blocks
         self.residual_blocks = nn.Sequential(
             *[ResidualBlock(hidden_dim, hidden_dim * 2, dropout) for _ in range(n_res_blocks)]
         )
         
-        # 3. 最后的 LayerNorm 和输出投影
+        # 3. layernorm and linear proj
         self.output_norm = nn.LayerNorm(hidden_dim)
         self.output_layer = nn.Linear(hidden_dim, output_dim)
     
@@ -843,19 +810,16 @@ class ResidualMLPHead(nn.Module):
         return x
 
 class STTransformer(nn.Module):
-    """
-    Spatio-Temporal Transformer
-    """
     def __init__(self, input_dim, hidden_dim, horizon, window_size, n_heads, n_layers, dropout=0.1):
         super().__init__()
-        config = Config() # 获取 MLP 的超参数
+        config = Config()
         self.horizon = horizon
         self.hidden_dim = hidden_dim
 
-        # 1. Spatio: 特征嵌入
+        # 1. Spatio
         self.input_projection = nn.Linear(input_dim, hidden_dim)
         
-        # 2. Temporal: 可学习的位置编码
+        # 2. Temporal
         self.pos_embed = nn.Parameter(torch.randn(1, window_size, hidden_dim)) 
         self.embed_dropout = nn.Dropout(dropout)
 
@@ -873,12 +837,12 @@ class STTransformer(nn.Module):
             num_layers=n_layers
         )
 
-        # 4. 池化 (复用你成熟的 Attention Pooling 机制)
+        # 4. pooling
         self.pool_ln = nn.LayerNorm(hidden_dim)
         self.pool_attn = nn.MultiheadAttention(hidden_dim, num_heads=n_heads, batch_first=True)
         self.pool_query = nn.Parameter(torch.randn(1, 1, hidden_dim)) 
 
-        # 5. 输出 Head (!!! 已替换为 ResidualMLPHead !!!)
+        # 5. output HEAD
         self.head = ResidualMLPHead(
             input_dim=hidden_dim,                   # 128
             hidden_dim=config.MLP_HIDDEN_DIM,       # 256
@@ -899,17 +863,12 @@ class STTransformer(nn.Module):
         ctx, _ = self.pool_attn(q, self.pool_ln(h), self.pool_ln(h))
         ctx = ctx.squeeze(1) 
 
-        out = self.head(ctx) # <--- 使用新的 Head
+        out = self.head(ctx) # <--- new head
         out = out.view(B, self.horizon, 2)
         
         out = torch.cumsum(out, dim=1)
         
         return out
-
-
-# ============================================================================
-# LOSS (YOUR PROVEN TEMPORAL HUBER)
-# ============================================================================
 
 class TemporalHuber(nn.Module):
     def __init__(self, delta=0.5, time_decay=0.03):
@@ -932,10 +891,6 @@ class TemporalHuber(nn.Module):
         
         return (huber * mask).sum() / (mask.sum() + 1e-8)
 
-# ============================================================================
-# TRAINING
-# ============================================================================
-
 def prepare_targets(batch_dx, batch_dy, max_h):
     tensors_x, tensors_y, masks = [], [], []
     
@@ -954,10 +909,6 @@ def prepare_targets(batch_dx, batch_dy, max_h):
     return targets, torch.stack(masks)
 
 def compute_val_rmse(model, X_val, y_val_dx, y_val_dy, horizon, device, batch_size=256):
-    """
-    Compute validation RMSE (Root Mean Squared Error) for 2D trajectory prediction.
-    Returns the average Euclidean distance error across all predictions.
-    """
     model.eval()
     all_errors = []
     
@@ -1098,12 +1049,16 @@ class NFLPredictor:
                     self.route_kmeans = pickle.load(f)
                 with open(load_dir / "route_scaler.pkl", "rb") as f:
                     self.route_scaler = pickle.load(f)
+                try:
+                    with open(load_dir / "feature_columns.pkl", "rb") as f:
+                        self.feature_columns = pickle.load(f)
+                except Exception:
+                    self.feature_columns = None
             except Exception as e:
                 print("Failed to load route artifacts:", e)
 
             # For input_dim, use a dummy array if needed
-            dummy_input_dim = 167  # fallback if not available
-            input_dim = dummy_input_dim
+            input_dim = None
             # Try to infer input_dim from scaler if possible
             try:
                 with open(load_dir / "scaler_fold1.pkl", "rb") as f:
@@ -1111,6 +1066,10 @@ class NFLPredictor:
                 input_dim = scaler1.mean_.shape[0]
             except Exception:
                 pass
+            if input_dim is None and getattr(self, "feature_columns", None) is not None:
+                input_dim = len(self.feature_columns)
+            if input_dim is None:
+                input_dim = 167
 
             for fold in range(1, config.N_FOLDS + 1):
                 model_path = load_dir / f"model_fold{fold}.pt"
@@ -1169,12 +1128,22 @@ class NFLPredictor:
             train_input = pd.concat([pd.read_csv(f) for f in train_input_files if f.exists()])
             train_output = pd.concat([pd.read_csv(f) for f in train_output_files if f.exists()])
 
+        bad_game_id = 2023091100
+        bad_play_id = 3167
+        before_in = len(train_input)
+        before_out = len(train_output)
+        train_input = train_input[~((train_input["game_id"] == bad_game_id) & (train_input["play_id"] == bad_play_id))]
+        train_output = train_output[~((train_output["game_id"] == bad_game_id) & (train_output["play_id"] == bad_play_id))]
+        print("Filtered input rows: ", before_in - len(train_input))
+        print("Filtered output rows: ", before_out - len(train_output))
+
         # 2. Prepare Sequences and Train Feature Objects
         print("\n[2/4] Preparing geometric sequences and feature scalers...")
         result = prepare_sequences_geometric(
             train_input, train_output, is_training=True, window_size=config.WINDOW_SIZE
         )
-        sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids, geo_x, geo_y, route_kmeans, route_scaler = result
+        sequences, targets_dx, targets_dy, targets_frame_ids, sequence_ids, geo_x, geo_y, route_kmeans, route_scaler, feature_cols = result
+        self.feature_columns = feature_cols
 
         # Store feature objects for later inference
         self.route_kmeans = route_kmeans
@@ -1264,42 +1233,38 @@ class NFLPredictor:
                     pickle.dump(self.route_kmeans, f)
                 with open(config.MODEL_DIR / "route_scaler.pkl", "wb") as f:
                     pickle.dump(self.route_scaler, f)
-                print(f"✓ Saved route artifacts -> route_kmeans.pkl, route_scaler.pkl")
+                with open(config.MODEL_DIR / "feature_columns.pkl", "wb") as f:
+                    pickle.dump(feature_cols, f)
+                print(f"✓ Saved route artifacts -> route_kmeans.pkl, route_scaler.pkl, feature_columns.pkl")
             except Exception as e:
                 print("Warning: failed to save route artifacts:", e)
 
         for model in self.models:
             model.eval()
-        print("\n🏆 Geometric Neural Breakthrough Model is ready for inference! 🏆")
 
 
     def predict(self, test: pl.DataFrame, test_input: pl.DataFrame) -> pd.DataFrame:
-        """Inference function called by the API for each time step."""
-        
         # Convert Polars DataFrames to Pandas, as the original notebook uses Pandas extensively
         test_input_pd = test_input.to_pandas()
         test_template_pd = test.to_pandas()
-
-        # --- 元データのプレイ方向（左/右）を保持（後で逆変換に使用） ---
-        flip_map = {}
-        flip_col = None
-        for cand in ['play_direction', 'playDirection']:
-            if cand in test_input_pd.columns:
-                flip_col = cand
+        
+        # 1. Prepare Test Sequences
+        # Use the stored feature objects (route_kmeans, route_scaler) for inference
+        # Determine expected feature dimension from available scalers/artifacts
+        expected_dim = None
+        for sc in self.scalers:
+            if hasattr(sc, 'mean_') and sc.mean_ is not None:
+                expected_dim = int(sc.mean_.shape[0])
                 break
-        if flip_col is not None:
-            left_by_play = (test_input_pd
-                            .groupby(['game_id', 'play_id'])[flip_col]
-                            .first()
-                            .astype(str).str.lower().str.startswith('l'))
-            flip_map = left_by_play.to_dict()
-        # -------------------------------------------------------------
+        if expected_dim is None and getattr(self, 'feature_columns', None) is not None:
+            expected_dim = int(len(self.feature_columns))
 
-        # 1. Prepare Test Sequences（内部で右基準に統一 & play_direction を削除）
         test_seq, test_ids, test_geo_x, test_geo_y = prepare_sequences_geometric(
             test_input_pd, test_template=test_template_pd, is_training=False,
             window_size=self.config.WINDOW_SIZE,
-            route_kmeans=self.route_kmeans, route_scaler=self.route_scaler
+            route_kmeans=self.route_kmeans, route_scaler=self.route_scaler,
+            feature_cols_override=getattr(self, "feature_columns", None),
+            expected_dim=expected_dim
         )
 
         X_test = list(test_seq)
@@ -1321,36 +1286,27 @@ class NFLPredictor:
 
         ens_preds = np.mean(all_preds, axis=0)
 
-        # 3. Format Submission (逆変換: 左プレイは (x, y) -> (120-x, 53.3-y) で元座標に戻す)
+        # 3. Format Submission (Corrected for API)
         rows = []
-        XMAX = self.config.FIELD_X_MAX
-        YMAX = self.config.FIELD_Y_MAX
-
         for i, sid in enumerate(test_ids):
-            gid, pid = sid['game_id'], sid['play_id']
-            is_left = flip_map.get((gid, pid), False)
-
             # The template DataFrame 'test' contains the info needed to map predictions
             fids = test_template_pd[
-                (test_template_pd['game_id'] == gid) &
-                (test_template_pd['play_id'] == pid) &
+                (test_template_pd['game_id'] == sid['game_id']) &
+                (test_template_pd['play_id'] == sid['play_id']) &
                 (test_template_pd['nfl_id'] == sid['nfl_id'])
             ]['frame_id'].sort_values().tolist()
             
             for t, fid in enumerate(fids):
                 tt = min(t, H - 1)
-                nx = np.clip(x_last[i] + ens_preds[i, tt, 0], 0, XMAX)
-                ny = np.clip(y_last[i] + ens_preds[i, tt, 1], 0, YMAX)
+                px = np.clip(x_last[i] + ens_preds[i, tt, 0], 0, self.config.FIELD_X_MAX)
+                py = np.clip(y_last[i] + ens_preds[i, tt, 1], 0, self.config.FIELD_Y_MAX)
 
-                # 左プレイは元の座標系へ戻す
-                if is_left:
-                    px = XMAX - nx
-                    py = YMAX - ny
-                else:
-                    px = nx
-                    py = ny
-
-                rows.append({'x': px, 'y': py})
+                # DO NOT include 'id' in the rows dict or final DataFrame
+                # The API will handle the row IDs based on the provided 'test' DataFrame
+                rows.append({
+                    'x': px,
+                    'y': py
+                })
 
         # The final returned DataFrame MUST only contain 'x' and 'y' columns, 
         # matching the order of rows in the input 'test' DataFrame.
@@ -1363,21 +1319,3 @@ predictor = NFLPredictor()
 def predict(test: pl.DataFrame, test_input: pl.DataFrame) -> pl.DataFrame | pd.DataFrame:
     """The function the API calls."""
     return predictor.predict(test, test_input)
-
-# The NFLPredictor class and the 'predict' wrapper function (defined in step 1.1) must
-# be executed BEFORE this final block.
-
-inference_server = kaggle_evaluation.nfl_inference_server.NFLInferenceServer(predict)
-
-if os.getenv('KAGGLE_IS_COMPETITION_RERUN'):
-    # This runs when Kaggle evaluates your submission on the hidden test set
-    inference_server.serve()
-else:
-    # This runs when you run the notebook locally (e.g., in a Kaggle session)
-    # The original main() logic should be executed once in the __init__ of NFLPredictor
-    # to train and save the model/weights which would be loaded here in a real scenario.
-    # For this script, we'll run a local gateway with the training included in __init__.
-    # Note: The provided files are .csv, not the final directory structure, so this
-    # local run might require custom paths depending on the exact setup.
-    # Based on the demo, we use the provided structure:
-    inference_server.run_local_gateway(('/kaggle/input/nfl-big-data-bowl-2026-prediction/',))

@@ -119,6 +119,39 @@ def train():
 if __name__ == "__main__":
     if Config.TRAIN:
         train()
+        
+
+### SUBMIT
+### =================================================================================
+
+import os
+import sys
+from pathlib import Path
+import pandas as pd
+import numpy as np
+
+def _ensure_module_paths():
+    candidates = []
+    try:
+        candidates.append(str(Path(__file__).parent))
+    except NameError:
+        pass
+    candidates.extend([
+        str(Path.cwd() / "src"),
+        os.environ.get("CONFIG_PATH"),
+        "/kaggle/input/private-dataset/src",
+        "/kaggle/working/src",
+    ])
+    for d in candidates:
+        if d and os.path.isdir(d) and d not in sys.path:
+            sys.path.insert(0, d)
+
+_ensure_module_paths()
+try:
+    from config import Config
+except ModuleNotFoundError:
+    _ensure_module_paths()
+    from config import Config
 
 # =============================================================================
 # Evaluation API Server Setup
@@ -143,6 +176,7 @@ Config.SUBMIT = True
 def _resolve_models_dir():
     tag = Config.TIME_TAG
     candidates = [
+        Path(f"/kaggle/input/models/{tag}"),
         Path(f"/kaggle/input/nfl2026/{tag}"),
         Path(f"/kaggle/working/output/{tag}"),
         Path(f"./output/{tag}"),
@@ -273,7 +307,6 @@ def predict(
 
     assert len(predictions) == len(test)
     return predictions
-
 
 if Config.SUBMIT:
     import kaggle_evaluation.nfl_inference_server  # type: ignore
